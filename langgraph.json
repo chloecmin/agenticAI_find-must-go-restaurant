@@ -1,0 +1,10 @@
+{
+    "graphs": {
+      "main": "graph.builder:build_graph"
+    },
+    "dependencies": [
+      "requirements.txt"
+    ],
+    "env": ".env",
+    "port": 8000
+  }

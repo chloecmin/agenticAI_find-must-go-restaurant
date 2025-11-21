@@ -1,6 +1,7 @@
 import os
 import json
 import logging
+import re
 from typing import TypedDict, List, Dict, Any
 
 from langchain_core.messages import SystemMessage, HumanMessage
@@ -11,12 +12,23 @@ from prompts.template import apply_prompt_template
 from tools.llm_tools import (
     es_search_tool,
     google_places_tool,
+    google_places_by_location_tool,
     calculator_tool,
-    get_price_tool,
+    menu_price_tool,
 )
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
+
+# 로그 포맷 설정 (터미널에서 더 잘 보이도록)
+if not logger.handlers:
+    handler = logging.StreamHandler()
+    formatter = logging.Formatter(
+        '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
+    )
+    handler.setFormatter(formatter)
+    logger.addHandler(handler)
 
 
 class AgentState(TypedDict, total=False):
@@ -40,7 +52,9 @@ class AgentState(TypedDict, total=False):
     history: List[Dict[str, str]]  # 선택사항: 전체 에이전트 로그
 
 
-llm = get_llm()
+# 기본 LLM (coordinator, planner, supervisor, evaluator용)
+# 환경변수 BASE_LLM_MODEL로 설정 가능 (기본값: qwen/qwen3-30b-a3b:free)
+llm = get_llm(model_name=os.getenv("BASE_LLM_MODEL", "qwen/qwen3-30b-a3b:free"))
 
 
 def _append_history(state: AgentState, role: str, content: str) -> None:
@@ -101,21 +115,21 @@ def planner_node(state: AgentState) -> AgentState:
     user_query = state["user_query"]
     core_plan = state.get("core_plan", "")
 
-    system_prompt = apply_prompt_template("planner")
+    system_prompt = apply_prompt_template("planner", {"USER_REQUEST": user_query})
     instruct = (
         "너는 세부 플래너야.\n"
         "코어 계획과 사용자 질문을 보고, 이번 턴에서 수행할 구체적인 서브태스크와\n"
         "어떤 종류의 툴에 집중할지 모드를 정해.\n\n"
-        "가능한 tool_mode 예시:\n"
-        "- restaurant : 맛집/장소 추천 위주 (ES + Google Places)\n"
-        "- review     : 리뷰/후기 요약 위주 (ES 중심)\n"
-        "- budget     : 예산/비용 계산 위주 (CSV + calculator)\n"
+        "가능한 tool_mode 값 (반드시 이 중 하나만 사용):\n"
+        "- restaurant : 맛집/장소 추천 위주\n"
+        "- review     : 리뷰/후기 요약 위주\n"
+        "- budget     : 예산/비용 계산 위주\n"
         "- mixed      : 여러 툴이 섞일 수 있는 일반 모드\n\n"
-        "아래 JSON 형식으로만 답해:\n"
-        "{\n"
-        '  \"tool_mode\": \"restaurant|review|budget|mixed\",\n'
-        '  \"subtask\": \"...이번 턴에서 수행할 한국어 서브태스크 설명...\"\n'
-        "}"
+        "중요: 반드시 아래 JSON 형식으로만 답변하세요. 다른 텍스트는 포함하지 마세요.\n"
+        "JSON 형식:\n"
+        '{"tool_mode": "restaurant", "subtask": "구체적인 서브태스크 설명"}\n\n'
+        "예시:\n"
+        '{"tool_mode": "restaurant", "subtask": "홍대 지역의 맛집을 검색하여 추천 목록 작성"}'
     )
 
     messages = [
@@ -130,17 +144,101 @@ def planner_node(state: AgentState) -> AgentState:
 
     resp = llm.invoke(messages)
     raw = resp.content
-    logger.info("[Planner] raw: %s", raw)
+    logger.info("[Planner] raw response (full): %s", raw)
+    logger.info("[Planner] raw response length: %d", len(raw))
 
     tool_mode = "mixed"
     subtask = ""
-    try:
-        data = json.loads(raw)
-        tool_mode = data.get("tool_mode", tool_mode)
-        subtask = data.get("subtask", "")
-    except Exception:
-        # JSON 파싱 실패 시 fallback
-        subtask = raw
+    
+    # 방법 1: 정규식으로 직접 추출 (가장 안전)
+    mode_match = re.search(r'"tool_mode"\s*:\s*["\']([^"\']+)["\']', raw, re.IGNORECASE)
+    if mode_match:
+        tool_mode = mode_match.group(1).strip().lower()
+        logger.info("[Planner] tool_mode found via regex: %s", tool_mode)
+    
+    # subtask는 여러 줄일 수 있으므로 더 넓은 패턴 사용
+    subtask_match = re.search(r'"subtask"\s*:\s*["\']((?:[^"\'\\]|\\.)+)["\']', raw, re.IGNORECASE | re.DOTALL)
+    if not subtask_match:
+        # 따옴표 없이도 찾기
+        subtask_match = re.search(r'"subtask"\s*:\s*([^,}\n]+)', raw, re.IGNORECASE)
+    if subtask_match:
+        subtask = subtask_match.group(1).strip().strip('"').strip("'")
+        logger.info("[Planner] subtask found via regex: %s", subtask[:100])
+    
+    # 방법 2: 정규식으로 찾지 못한 경우 JSON 파싱 시도
+    if tool_mode == "mixed" or not subtask:
+        try:
+            # JSON 블록 추출
+            code_block_match = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', raw, re.DOTALL)
+            if code_block_match:
+                json_str = code_block_match.group(1)
+            else:
+                # 일반 JSON 객체 추출
+                json_match = re.search(r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}', raw, re.DOTALL)
+                if json_match:
+                    json_str = json_match.group(0)
+                else:
+                    json_str = raw
+            
+            # JSON 문자열 정리 (모든 줄바꿈과 불필요한 공백 제거)
+            json_str = json_str.strip()
+            # 키 이름의 줄바꿈 제거
+            json_str = re.sub(r'"\s*\n\s*"', '", "', json_str)
+            json_str = re.sub(r':\s*\n\s*', ': ', json_str)
+            
+            logger.info("[Planner] cleaned json_str: %s", json_str[:300])
+            
+            # JSON 파싱
+            data = json.loads(json_str)
+            logger.info("[Planner] parsed data keys: %s", list(data.keys()) if isinstance(data, dict) else "not a dict")
+            
+            # 안전하게 키 접근
+            if isinstance(data, dict):
+                # 원본 키로 먼저 시도
+                if "tool_mode" in data:
+                    tool_mode = str(data["tool_mode"]).strip().lower()
+                elif "toolMode" in data:
+                    tool_mode = str(data["toolMode"]).strip().lower()
+                
+                if "subtask" in data:
+                    subtask = str(data["subtask"]).strip()
+                elif "subTask" in data:
+                    subtask = str(data["subTask"]).strip()
+                
+                # 위에서 못 찾은 경우 모든 키를 순회
+                if tool_mode == "mixed" or not subtask:
+                    for key, value in data.items():
+                        key_str = str(key).strip().lower().replace('\n', '').replace('"', '').replace(' ', '')
+                        if 'toolmode' in key_str or 'tool_mode' in key_str:
+                            tool_mode = str(value).strip().lower()
+                        elif 'subtask' in key_str:
+                            subtask = str(value).strip()
+            
+        except json.JSONDecodeError as e:
+            logger.warning(f"[Planner] JSON 파싱 실패: {e}, json_str: {json_str[:200] if 'json_str' in locals() else 'N/A'}")
+        except KeyError as e:
+            logger.warning(f"[Planner] KeyError 발생: {e}, data keys: {list(data.keys()) if 'data' in locals() and isinstance(data, dict) else 'N/A'}")
+        except Exception as e:
+            logger.warning(f"[Planner] 예상치 못한 에러: {e}, type: {type(e)}")
+    
+    # tool_mode 값 정리
+    if tool_mode and tool_mode != "mixed":
+        tool_mode = str(tool_mode).strip().lower()
+        # "tool_mode-restaurant" 같은 형식에서 "restaurant" 추출
+        if "-" in tool_mode:
+            tool_mode = tool_mode.split("-")[-1]
+        # 유효한 tool_mode인지 확인
+        valid_modes = ["restaurant", "review", "budget", "mixed"]
+        if tool_mode not in valid_modes:
+            logger.warning(f"[Planner] 유효하지 않은 tool_mode: {tool_mode}, 기본값 'mixed' 사용")
+            tool_mode = "mixed"
+    
+    # subtask가 없으면 raw 전체를 사용
+    if not subtask:
+        subtask = raw.strip()
+        logger.warning("[Planner] subtask를 찾지 못해 raw 전체 사용")
+    
+    logger.info("[Planner] 최종 결과 - tool_mode: %s, subtask: %s", tool_mode, subtask[:100])
 
     state["tool_mode"] = tool_mode
     state["subtask"] = subtask
@@ -148,63 +246,152 @@ def planner_node(state: AgentState) -> AgentState:
     return state
 
 
-# ---------------- Tool Agent (ReAct) ----------------
+# ---------------- Sub Agents (ReAct) ----------------
 
-# ReAct 에이전트 생성 (LLM + tools)
-tool_llm = get_llm()
-tools = [es_search_tool, google_places_tool, calculator_tool, get_price_tool]
-tool_react_agent = create_react_agent(tool_llm, tools)
+# Sub Agent용 LLM (tool use를 지원하는 모델 필요)
+sub_agent_llm = get_llm(model_name=os.getenv("TOOL_LLM_MODEL", "openai/gpt-4o-mini"))
 
 
-def tool_agent_node(state: AgentState) -> AgentState:
+# ---------------- Search Agent ----------------
+
+search_agent = create_react_agent(sub_agent_llm, [es_search_tool])
+
+
+def search_agent_node(state: AgentState) -> AgentState:
     """
-    ReAct 스타일로 LLM이 어떤 툴을 쓸지 스스로 선택/조합하는 노드.
-    - 입력: user_query, core_plan, subtask, tool_mode
-    - 출력: tool_trace (툴 실행 + reasoning + 중간 요약)
+    맛집 검색을 담당하는 Sub Agent.
+    es_search_tool을 사용해서 맛집 리스트를 찾습니다.
     """
     user_query = state["user_query"]
     core_plan = state.get("core_plan", "")
     subtask = state.get("subtask", "")
-    tool_mode = state.get("tool_mode", "mixed")
-
-    # tool-agent용 system/사용자 메시지 구성
-    system_prompt = (
-        "너는 여러 도구를 사용할 수 있는 에이전트야.\n"
-        "주어진 서브태스크를 해결하기 위해 필요하다면 아래 툴들을 적절히 조합해 사용해.\n"
-        f"이번 턴의 모드(tool_mode)는 '{tool_mode}'야. 이 모드의 목적에 맞게 툴을 우선 활용해.\n"
-        "최종적으로는 서브태스크를 해결하는데 필요한 사실/수치/후보 리스트를 정리된 형태로 남겨줘.\n"
-        "단, 사용자에게 직접 말하는 답안이 아니라, 후속 에이전트가 참고할 수 있는 메모를 작성한다고 생각해.\n"
-        "- 예산/비용을 계산해야 할 때는 다음 절차를 따른다:\n"
-        " 1) 먼저 menu_price_tool을 호출해 해당 식당의 메뉴 이름과 가격을 확인한다.\n"
-        " 2) 사용자와 동행자의 선호(예: 김치 없음, 매운 음식, 디저트 추가 등)를 반영해 어떤 메뉴를 몇 개 주문할지 스스로 결정한다.\n"
-        " 3) 결정된 메뉴 조합을 바탕으로 "12000*2 + 9000"과 같이 수식 문자열을 만들고, calculator_tool을 호출해 총 예산을 계산한다.\n"
-        " 4) 최종적으로 계산된 예산 값과 선택한 메뉴들을 메모에 정리해 남긴다."
-    )
-
+    
+    system_prompt = apply_prompt_template("search_agent")
+    
     content = (
         f"[사용자 질문]\n{user_query}\n\n"
         f"[코어 계획]\n{core_plan}\n\n"
-        f"[이번 턴 서브태스크]\n{subtask}\n"
+        f"[이번 턴 서브태스크]\n{subtask}\n\n"
+        "위 정보를 바탕으로 es_search_tool을 사용해서 맛집을 검색해줘."
     )
-
-    # ReAct 에이전트 호출
-    result = tool_react_agent.invoke(
-        {
-            "messages": [
-                ("system", system_prompt),
-                ("user", content),
-            ]
-        }
-    )
-
-    # 마지막 assistant 메시지를 tool_trace로 저장
+    
+    result = search_agent.invoke({
+        "messages": [
+            ("system", system_prompt),
+            ("user", content),
+        ]
+    })
+    
     final_msg = result["messages"][-1]
     trace = final_msg.content
-
-    state["tool_trace"] = trace
-    _append_history(state, "tool_agent", trace)
-    logger.info("[ToolAgent] trace: %s", trace[:300])
+    
+    # 기존 tool_trace에 추가 (여러 sub agent 결과를 합치기 위해)
+    existing_trace = state.get("tool_trace", "")
+    if existing_trace:
+        state["tool_trace"] = existing_trace + "\n\n[Search Agent 결과]\n" + trace
+    else:
+        state["tool_trace"] = "[Search Agent 결과]\n" + trace
+    
+    _append_history(state, "search_agent", trace)
+    logger.info("[SearchAgent] trace: %s", trace[:300])
     return state
+
+
+# ---------------- Places Agent ----------------
+
+places_agent = create_react_agent(sub_agent_llm, [google_places_tool, google_places_by_location_tool])
+
+
+def places_agent_node(state: AgentState) -> AgentState:
+    """
+    Google Places 정보를 가져오는 Sub Agent.
+    google_places_tool 또는 google_places_by_location_tool을 사용합니다.
+    """
+    user_query = state["user_query"]
+    core_plan = state.get("core_plan", "")
+    subtask = state.get("subtask", "")
+    tool_trace = state.get("tool_trace", "")  # search_agent 결과가 있을 수 있음
+    
+    system_prompt = apply_prompt_template("places_agent")
+    
+    content = (
+        f"[사용자 질문]\n{user_query}\n\n"
+        f"[코어 계획]\n{core_plan}\n\n"
+        f"[이번 턴 서브태스크]\n{subtask}\n\n"
+    )
+    
+    if tool_trace:
+        content += f"[이전 검색 결과 (참고용)]\n{tool_trace}\n\n"
+    
+    content += "위 정보를 바탕으로 Google Places에서 식당 정보와 리뷰를 가져와줘."
+    
+    result = places_agent.invoke({
+        "messages": [
+            ("system", system_prompt),
+            ("user", content),
+        ]
+    })
+    
+    final_msg = result["messages"][-1]
+    trace = final_msg.content
+    
+    # 기존 tool_trace에 추가
+    existing_trace = state.get("tool_trace", "")
+    if existing_trace:
+        state["tool_trace"] = existing_trace + "\n\n[Places Agent 결과]\n" + trace
+    else:
+        state["tool_trace"] = "[Places Agent 결과]\n" + trace
+    
+    _append_history(state, "places_agent", trace)
+    logger.info("[PlacesAgent] trace: %s", trace[:300])
+    return state
+
+
+# ---------------- Budget Agent ----------------
+
+budget_agent = create_react_agent(sub_agent_llm, [calculator_tool, menu_price_tool])
+
+
+def budget_agent_node(state: AgentState) -> AgentState:
+    """
+    예산 계산을 담당하는 Sub Agent.
+    calculator_tool과 menu_price_tool을 사용합니다.
+    """
+    user_query = state["user_query"]
+    core_plan = state.get("core_plan", "")
+    subtask = state.get("subtask", "")
+    
+    system_prompt = apply_prompt_template("budget_agent")
+    
+    content = (
+        f"[사용자 질문]\n{user_query}\n\n"
+        f"[코어 계획]\n{core_plan}\n\n"
+        f"[이번 턴 서브태스크]\n{subtask}\n\n"
+        "위 정보를 바탕으로 예산을 계산해줘."
+    )
+    
+    result = budget_agent.invoke({
+        "messages": [
+            ("system", system_prompt),
+            ("user", content),
+        ]
+    })
+    
+    final_msg = result["messages"][-1]
+    trace = final_msg.content
+    
+    # 기존 tool_trace에 추가
+    existing_trace = state.get("tool_trace", "")
+    if existing_trace:
+        state["tool_trace"] = existing_trace + "\n\n[Budget Agent 결과]\n" + trace
+    else:
+        state["tool_trace"] = "[Budget Agent 결과]\n" + trace
+    
+    _append_history(state, "budget_agent", trace)
+    logger.info("[BudgetAgent] trace: %s", trace[:300])
+    return state
+
+
 
 
 # ---------------- Supervisor ----------------
@@ -221,7 +408,16 @@ def supervisor_node(state: AgentState) -> AgentState:
     tool_mode = state.get("tool_mode", "mixed")
     tool_trace = state.get("tool_trace", "")
 
+    logger.info("[Supervisor] 시작 - tool_trace 길이: %d", len(tool_trace))
+    
     system_prompt = apply_prompt_template("supervisor")
+    
+    # tool_trace가 너무 길면 일부만 사용 (LLM 토큰 제한 고려)
+    tool_trace_preview = tool_trace[:3000] if len(tool_trace) > 3000 else tool_trace
+    if len(tool_trace) > 3000:
+        tool_trace_preview += "\n\n[참고: tool_trace가 길어 일부만 표시했습니다. 위 정보를 우선 참고하세요.]"
+        logger.warning("[Supervisor] tool_trace가 너무 길어 일부만 사용: %d -> %d", len(tool_trace), len(tool_trace_preview))
+    
     messages = [
         SystemMessage(content=system_prompt),
         HumanMessage(
@@ -230,17 +426,33 @@ def supervisor_node(state: AgentState) -> AgentState:
                 f"[사용자 질문]\n{user_query}\n\n"
                 f"[코어 계획]\n{core_plan}\n\n"
                 f"[이번 턴 서브태스크]\n{subtask}\n\n"
-                f"[툴 실행 결과/메모]\n{tool_trace}\n\n"
+                f"[툴 실행 결과/메모]\n{tool_trace_preview}\n\n"
+                "**중요: es_search_tool 결과에 나온 식당만 언급해야 합니다. "
+                "검색 결과에 '[1] 식당명', '[2] 식당명' 형식으로 나온 식당들만 답변에 포함하고, "
+                "검색 결과에 없는 식당은 절대 언급하지 마세요. "
                 "사용자 입장에서 이해하기 쉽도록, 단계적으로 설명해줘."
             )
         ),
     ]
 
-    resp = llm.invoke(messages)
-    draft = resp.content
+    try:
+        logger.info("[Supervisor] LLM 호출 시작...")
+        resp = llm.invoke(messages)
+        draft = resp.content
+        logger.info("[Supervisor] LLM 응답 받음, 길이: %d", len(draft))
+        logger.info("[Supervisor] draft 미리보기: %s", draft[:200])
+    except Exception as e:
+        logger.error("[Supervisor] LLM 호출 실패: %s", str(e))
+        # 에러 발생 시 기본 답변 생성
+        draft = (
+            f"죄송합니다. 답변 생성 중 오류가 발생했습니다.\n\n"
+            f"사용자 질문: {user_query}\n\n"
+            f"툴 실행 결과에서 다음 정보를 확인했습니다:\n{tool_trace[:500]}"
+        )
 
     state["draft_answer"] = draft
     _append_history(state, "supervisor", draft)
+    logger.info("[Supervisor] 완료")
     return state
 
 
@@ -284,11 +496,34 @@ def evaluator_node(state: AgentState) -> AgentState:
     needs_revision = False
     feedback = ""
     try:
-        data = json.loads(raw)
+        # JSON 블록 추출 시도
+        code_block_match = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', raw, re.DOTALL)
+        if code_block_match:
+            json_str = code_block_match.group(1)
+        else:
+            json_match = re.search(r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}', raw, re.DOTALL)
+            if json_match:
+                json_str = json_match.group(0)
+            else:
+                json_str = raw
+        
+        json_str = json_str.strip()
+        data = json.loads(json_str)
+        
         needs_revision = bool(data.get("needs_revision", False))
         feedback = data.get("feedback", "")
-    except Exception:
+        
+        # feedback이 있고 개선이 필요하다고 언급되면 needs_revision을 true로 설정
+        if feedback and not needs_revision:
+            # feedback 내용 분석: 개선, 부족, 추가 등의 키워드가 있으면 revision 필요
+            improvement_keywords = ["부족", "개선", "추가", "더", "명확", "정리", "설명", "보완", "수정"]
+            if any(keyword in feedback for keyword in improvement_keywords):
+                logger.info("[Evaluator] feedback에 개선 요구가 있어 needs_revision을 true로 설정")
+                needs_revision = True
+                
+    except Exception as e:
         # 파싱 실패 시, 그냥 이 답변을 최종으로 사용
+        logger.warning(f"[Evaluator] JSON 파싱 실패: {e}, raw: {raw[:200]}")
         needs_revision = False
         feedback = "파싱 실패로 인해 현재 답변을 그대로 사용합니다."
 
@@ -296,9 +531,10 @@ def evaluator_node(state: AgentState) -> AgentState:
     loop = state.get("loop_count", 0) + 1
     state["loop_count"] = loop
 
-    # 너무 많이 루프 돌면 강제로 종료
-    if loop >= 2:
+    # 너무 많이 루프 돌면 강제로 종료 (최대 3번: 첫 실행 + 재시도 2번)
+    if loop >= 3:
         needs_revision = False
+        logger.info("[Evaluator] 최대 루프 횟수(3번) 도달, 강제 종료")
 
     state["needs_revision"] = needs_revision
     state["eval_feedback"] = feedback
@@ -306,10 +542,59 @@ def evaluator_node(state: AgentState) -> AgentState:
     if not needs_revision:
         # 최종 답변 확정
         state["final_answer"] = draft
+        logger.info("[Evaluator] 최종 답변 확정: %s", draft[:200])
+    else:
+        logger.info("[Evaluator] 재검토 필요, coordinator로 복귀. feedback: %s", feedback[:200])
 
     _append_history(
         state,
         "evaluator",
         f"needs_revision={needs_revision}\nfeedback={feedback}",
     )
+    return state
+
+
+# ---------------- Final Output ----------------
+
+def final_output_node(state: AgentState) -> AgentState:
+    """
+    최종 답변(final_answer)을 가독성 좋게 정리하고 출력하는 노드.
+    """
+    final_answer = state.get("final_answer", "")
+    
+    if final_answer:
+        # LLM을 사용해서 가독성 좋게 정리
+        system_prompt = apply_prompt_template("final_output")
+        messages = [
+            SystemMessage(content=system_prompt),
+            HumanMessage(
+                content=(
+                    "아래 최종 답변을 가독성 좋게 정리해서 다시 작성해줘.\n\n"
+                    f"[원본 답변]\n{final_answer}"
+                )
+            ),
+        ]
+        
+        try:
+            logger.info("[FinalOutput] 답변 포맷팅 시작...")
+            resp = llm.invoke(messages)
+            formatted_answer = resp.content
+            
+            print("\n" + "="*80)
+            print("최종 답변")
+            print("="*80)
+            print(formatted_answer)
+            print("="*80 + "\n")
+            logger.info("[FinalOutput] 최종 답변 출력 완료 (포맷팅됨)")
+        except Exception as e:
+            logger.error("[FinalOutput] 포맷팅 실패: %s, 원본 출력", str(e))
+            print("\n" + "="*80)
+            print("최종 답변")
+            print("="*80)
+            print(final_answer)
+            print("="*80 + "\n")
+    else:
+        print("\n[경고] final_answer가 설정되지 않았습니다.\n")
+        logger.warning("[FinalOutput] final_answer가 없습니다.")
+    
     return state

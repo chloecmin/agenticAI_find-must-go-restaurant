@@ -7,6 +7,7 @@ import requests
 # Google Places API 엔드포인트
 TEXT_ENDPOINT = "https://maps.googleapis.com/maps/api/place/textsearch/json"
 NEARBY_ENDPOINT = "https://maps.googleapis.com/maps/api/place/nearbysearch/json"
+DETAILS_ENDPOINT = "https://maps.googleapis.com/maps/api/place/details/json"
 
 
 def _get_api_key() -> str:
@@ -60,6 +61,7 @@ def search_place(
     for r in results:
         places.append(
             {
+                "place_id": r.get("place_id"),  # place_id 추가
                 "name": r.get("name"),
                 "address": r.get("formatted_address"),
                 "location": r.get("geometry", {}).get("location"),
@@ -111,6 +113,7 @@ def search_place_by_location(
     for r in results:
         places.append(
             {
+                "place_id": r.get("place_id"),  # place_id 추가
                 "name": r.get("name"),
                 "address": r.get("vicinity"),  # nearbysearch에서는 formatted_address 대신 vicinity 사용
                 "location": r.get("geometry", {}).get("location"),
@@ -120,3 +123,148 @@ def search_place_by_location(
             }
         )
     return places
+
+
+# --------------------------------------------------
+# 3) Place Details API: place_id로 상세 정보 및 리뷰 가져오기
+# --------------------------------------------------
+
+def get_place_details(
+    place_id: str,
+    language: str = "ko",
+) -> Dict[str, Any]:
+    """
+    Place Details API를 사용해서 특정 장소의 상세 정보와 리뷰를 가져온다.
+    
+    Args:
+        place_id: Google Places API의 place_id
+        language: 언어 코드 (기본값: "ko")
+    
+    Returns:
+        {
+            "name": str,
+            "address": str,
+            "rating": float,
+            "user_ratings_total": int,
+            "reviews": List[Dict],  # 리뷰 리스트 (상위 3개)
+            "phone_number": str,  # 전화번호
+            "opening_hours": List[str]  # 요일별 영업시간
+        }
+    """
+    api_key = _get_api_key()
+    
+    params = {
+        "key": api_key,
+        "place_id": place_id,
+        "language": language,
+        "fields": "name,formatted_address,rating,user_ratings_total,reviews,formatted_phone_number,opening_hours",  # 필요한 필드만 요청
+    }
+    
+    resp = requests.get(DETAILS_ENDPOINT, params=params, timeout=10)
+    resp.raise_for_status()
+    data = resp.json()
+    
+    result = data.get("result", {})
+    
+    # 리뷰는 상위 3개만
+    reviews = result.get("reviews", [])[:3]
+    
+    # 영업시간 추출
+    opening_hours = []
+    opening_hours_data = result.get("opening_hours", {})
+    if opening_hours_data:
+        weekday_text = opening_hours_data.get("weekday_text", [])
+        opening_hours = weekday_text if weekday_text else []
+    
+    return {
+        "name": result.get("name"),
+        "address": result.get("formatted_address"),
+        "rating": result.get("rating"),
+        "user_ratings_total": result.get("user_ratings_total"),
+        "reviews": reviews,  # 상위 3개만
+        "phone_number": result.get("formatted_phone_number"),
+        "opening_hours": opening_hours,  # 요일별 영업시간
+    }
+
+
+def get_place_reviews_by_name_and_location(
+    restaurant_name: str,
+    latitude: float,
+    longitude: float,
+    language: str = "ko",
+) -> Dict[str, Any]:
+    """
+    식당 이름과 위도/경도를 사용해서 Google Places에서 리뷰를 가져온다.
+    
+    절차:
+    1. 위도/경도로 Nearby Search를 해서 식당 이름과 매칭되는 place_id 찾기
+    2. place_id로 Place Details API 호출해서 리뷰 가져오기
+    
+    Args:
+        restaurant_name: 식당 이름
+        latitude: 위도
+        longitude: 경도
+        language: 언어 코드
+    
+    Returns:
+        get_place_details와 동일한 형식
+    """
+    # 1단계: Nearby Search로 place_id 찾기
+    places = search_place_by_location(
+        latitude=latitude,
+        longitude=longitude,
+        keyword=restaurant_name,
+        radius=100,  # 100m 반경으로 좁혀서 정확도 높이기
+        language=language,
+    )
+    
+    if not places:
+        return {
+            "name": restaurant_name,
+            "address": None,
+            "rating": None,
+            "user_ratings_total": 0,
+            "reviews": [],
+            "phone_number": None,
+            "opening_hours": [],
+        }
+    
+    # 식당 이름과 가장 유사한 결과 찾기
+    best_match = None
+    for place in places:
+        place_name = place.get("name", "").lower()
+        if restaurant_name.lower() in place_name or place_name in restaurant_name.lower():
+            best_match = place
+            break
+    
+    # 매칭되는 게 없으면 첫 번째 결과 사용
+    if not best_match:
+        best_match = places[0]
+    
+    # place_id가 있으면 Place Details API 호출
+    place_id = best_match.get("place_id")
+    if place_id:
+        try:
+            return get_place_details(place_id, language)
+        except Exception as e:
+            # Place Details API 실패 시 기본 정보만 반환
+            return {
+                "name": best_match.get("name", restaurant_name),
+                "address": best_match.get("address"),
+                "rating": best_match.get("rating"),
+                "user_ratings_total": best_match.get("user_ratings_total", 0),
+                "reviews": [],
+                "phone_number": None,
+                "opening_hours": [],
+            }
+    
+    # place_id가 없으면 기본 정보만 반환
+    return {
+        "name": best_match.get("name", restaurant_name),
+        "address": best_match.get("address"),
+        "rating": best_match.get("rating"),
+        "user_ratings_total": best_match.get("user_ratings_total", 0),
+        "reviews": [],
+        "phone_number": None,
+        "opening_hours": [],
+    }
