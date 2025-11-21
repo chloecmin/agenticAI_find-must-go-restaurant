@@ -20,22 +20,34 @@ def planner_router(state: AgentState) -> str:
     """
     tool_mode = state.get("tool_mode", "mixed")
     user_query = state.get("user_query", "").lower()
+    subtask = state.get("subtask", "").lower()
     
     # 예산 관련 키워드
     budget_keywords = ["예산", "비용", "가격", "돈", "얼마", "계산"]
-    needs_budget = any(keyword in user_query for keyword in budget_keywords)
+    needs_budget = (
+        tool_mode == "budget"
+        or "budget" in tool_mode
+        or any(keyword in user_query for keyword in budget_keywords)
+        or any(keyword in subtask for keyword in budget_keywords)
+    )
     
     # 맛집 검색 관련 키워드
     search_keywords = ["맛집", "식당", "추천", "찾아", "검색", "근처"]
-    needs_search = any(keyword in user_query for keyword in search_keywords)
+    needs_search = any(keyword in user_query for keyword in search_keywords) or any(
+        keyword in subtask for keyword in search_keywords
+    )
     
     # 리뷰/상세 정보 관련 키워드
     review_keywords = ["리뷰", "평점", "후기", "어때", "추천할만", "정보"]
-    needs_review = any(keyword in user_query for keyword in review_keywords)
+    needs_review = any(keyword in user_query for keyword in review_keywords) or any(
+        keyword in subtask for keyword in review_keywords
+    )
     
     # 특정 식당 이름이 명확히 언급된 경우
     specific_restaurant_keywords = ["텐동야", "파스타노바", "비스트로온", "돈카츠모노", "김치찌개연구소"]
-    has_specific_restaurant = any(keyword in user_query for keyword in specific_restaurant_keywords)
+    has_specific_restaurant = any(keyword in user_query for keyword in specific_restaurant_keywords) or any(
+        keyword in subtask for keyword in specific_restaurant_keywords
+    )
     
     # 실행 순서 결정 (planner에서는 항상 sub agent 중 하나를 선택)
     
@@ -66,22 +78,34 @@ def sub_agent_router(state: AgentState) -> str:
     """
     tool_mode = state.get("tool_mode", "mixed")
     user_query = state.get("user_query", "").lower()
+    subtask = state.get("subtask", "").lower()
     
     # 예산 관련 키워드
     budget_keywords = ["예산", "비용", "가격", "돈", "얼마", "계산"]
-    needs_budget = any(keyword in user_query for keyword in budget_keywords)
+    needs_budget = (
+        tool_mode == "budget"
+        or "budget" in tool_mode
+        or any(keyword in user_query for keyword in budget_keywords)
+        or any(keyword in subtask for keyword in budget_keywords)
+    )
     
     # 맛집 검색 관련 키워드
     search_keywords = ["맛집", "식당", "추천", "찾아", "검색", "근처"]
-    needs_search = any(keyword in user_query for keyword in search_keywords)
+    needs_search = any(keyword in user_query for keyword in search_keywords) or any(
+        keyword in subtask for keyword in search_keywords
+    )
     
     # 리뷰/상세 정보 관련 키워드
     review_keywords = ["리뷰", "평점", "후기", "어때", "추천할만", "정보"]
-    needs_review = any(keyword in user_query for keyword in review_keywords)
+    needs_review = any(keyword in user_query for keyword in review_keywords) or any(
+        keyword in subtask for keyword in review_keywords
+    )
     
     # 특정 식당 이름이 명확히 언급된 경우
     specific_restaurant_keywords = ["텐동야", "파스타노바", "비스트로온", "돈카츠모노", "김치찌개연구소"]
-    has_specific_restaurant = any(keyword in user_query for keyword in specific_restaurant_keywords)
+    has_specific_restaurant = any(keyword in user_query for keyword in specific_restaurant_keywords) or any(
+        keyword in subtask for keyword in specific_restaurant_keywords
+    )
     
     # 현재 실행 상태 확인
     tool_trace = state.get("tool_trace", "")
