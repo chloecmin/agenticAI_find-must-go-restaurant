@@ -13,7 +13,7 @@
 pip install -r requirements.txt
 ```
 
-2. 환경 변수 설정
+2. 환경 변수 설정  <br/>
 프로젝트 루트에 `.env` 파일을 생성하고 다음 환경변수를 설정:
 ```bash
 # -------- LLM API KEY --------
