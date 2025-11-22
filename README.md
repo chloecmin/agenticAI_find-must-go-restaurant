@@ -1,7 +1,9 @@
-# 고려대학교 빅데이터와정보검색 팀 프로젝트 : Find Must Go Restaurant
+# Find Must Go Restaurant
 ---
 ## 프로젝트 INFO
-- 개요 : AgenticAI 기반 맛집검색엔진 구축
+- 개요 : 고려대학교 SW·AI융합대학원 팀프로젝트
+- 과목 : 빅데이터와 정보검색색
+- 주제 : AgenticAI 기반 맛집검색엔진 구축
 - 기간 : 2025.11.19 ~
 - 참여자 : 민채정, 심기성, 이윤주, 권지수
 ---
