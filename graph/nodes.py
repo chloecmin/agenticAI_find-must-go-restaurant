@@ -360,6 +360,7 @@ def budget_agent_node(state: AgentState) -> AgentState:
     user_query = state["user_query"]
     core_plan = state.get("core_plan", "")
     subtask = state.get("subtask", "")
+    tool_trace = state.get("tool_trace", "")  # search_agent나 places_agent 결과가 있을 수 있음
     
     system_prompt = apply_prompt_template("budget_agent")
     
@@ -367,8 +368,12 @@ def budget_agent_node(state: AgentState) -> AgentState:
         f"[사용자 질문]\n{user_query}\n\n"
         f"[코어 계획]\n{core_plan}\n\n"
         f"[이번 턴 서브태스크]\n{subtask}\n\n"
-        "위 정보를 바탕으로 예산을 계산해줘."
     )
+    
+    if tool_trace:
+        content += f"[이전 검색 결과 (참고용)]\n{tool_trace}\n\n"
+    
+    content += "위 정보를 바탕으로 예산을 계산해줘."
     
     result = budget_agent.invoke({
         "messages": [
@@ -559,6 +564,7 @@ def evaluator_node(state: AgentState) -> AgentState:
 def final_output_node(state: AgentState) -> AgentState:
     """
     최종 답변(final_answer)을 가독성 좋게 정리하고 출력하는 노드.
+    포맷팅된 답변을 state에 저장하여 LangGraph Studio에서도 확인할 수 있도록 함.
     """
     final_answer = state.get("final_answer", "")
     
@@ -580,6 +586,10 @@ def final_output_node(state: AgentState) -> AgentState:
             resp = llm.invoke(messages)
             formatted_answer = resp.content
             
+            # 포맷팅된 답변을 state에 저장 (LangGraph Studio에서 확인 가능)
+            state["final_answer"] = formatted_answer
+            
+            # 터미널에 출력
             print("\n" + "="*80)
             print("최종 답변")
             print("="*80)
@@ -588,6 +598,7 @@ def final_output_node(state: AgentState) -> AgentState:
             logger.info("[FinalOutput] 최종 답변 출력 완료 (포맷팅됨)")
         except Exception as e:
             logger.error("[FinalOutput] 포맷팅 실패: %s, 원본 출력", str(e))
+            # 포맷팅 실패 시 원본 답변 유지
             print("\n" + "="*80)
             print("최종 답변")
             print("="*80)
