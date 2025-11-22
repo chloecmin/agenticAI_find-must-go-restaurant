@@ -1,10 +1,10 @@
+# 환경변수를 가장 먼저 로드 (모든 import 전에 실행)
+from dotenv import load_dotenv
+load_dotenv()
+
 import argparse
 import asyncio
-from dotenv import load_dotenv
-
 from graph.builder import build_graph
-
-load_dotenv()
 
 
 async def run_streaming(user_query: str):
