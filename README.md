@@ -33,4 +33,9 @@ ES_INDEX="your index"
 GOOGLE_PLACES_API_KEY="your Key"
 GOOGLE_PLACES_REGION="your region"
 ```
+
+3. 실행
+```bash
+python main.py --user_query "홍대에서 우동 맛집 찾고 2개 먹을 때 가격 알려줘"
+``` 
 ---
