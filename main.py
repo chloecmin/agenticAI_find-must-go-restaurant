@@ -10,45 +10,86 @@ from graph.builder import build_graph
 async def run_streaming(user_query: str):
     graph = build_graph()
 
-    # 초기 상태
+    # 초기 상태 (AgentState 형식에 맞춤)
     state = {
         "user_query": user_query,
         "history": [],
-        "plan": "",
-        "search_query": "",
-        "search_results": [],
-        "answer": "",
     }
+    
+    # checkpointer 사용을 위한 config (thread_id 필요)
+    config = {"configurable": {"thread_id": "stream-1"}}
 
     print("=== LangGraph Streaming Start ===")
-    async for event in graph.astream(state):
+    async for event in graph.astream(state, config=config):
         # event는 {"coordinator": {...}}, {"planner": {...}} 이런 식의 delta
         for node_name, node_state in event.items():
             print(f"\n--- [{node_name}] ---")
-            # 마지막 answer만 출력하고 싶다면 조건 걸어도 됨
-            answer = node_state.get("answer")
-            plan = node_state.get("plan")
-            if plan:
-                print("[plan]", plan[:300])
-            if answer:
-                print("[answer]", answer[:500])
+            # final_answer 확인
+            final_answer = node_state.get("final_answer")
+            if final_answer:
+                print("[final_answer]", final_answer[:500])
 
     print("\n=== Streaming Finished ===")
+
+# async def run_streaming(user_query: str):
+#     graph = build_graph()
+
+#     # 초기 상태
+#     state = {
+#         "user_query": user_query,
+#         "history": [],
+#         "plan": "",
+#         "search_query": "",
+#         "search_results": [],
+#         "answer": "",
+#     }
+
+#     print("=== LangGraph Streaming Start ===")
+#     async for event in graph.astream(state):
+#         # event는 {"coordinator": {...}}, {"planner": {...}} 이런 식의 delta
+#         for node_name, node_state in event.items():
+#             print(f"\n--- [{node_name}] ---")
+#             # 마지막 answer만 출력하고 싶다면 조건 걸어도 됨
+#             answer = node_state.get("answer")
+#             plan = node_state.get("plan")
+#             if plan:
+#                 print("[plan]", plan[:300])
+#             if answer:
+#                 print("[answer]", answer[:500])
+
+#     print("\n=== Streaming Finished ===")
 
 
 def run_once(user_query: str):
     graph = build_graph()
+    
+    # 초기 상태 (AgentState 형식에 맞춤)
     state = {
         "user_query": user_query,
         "history": [],
-        "plan": "",
-        "search_query": "",
-        "search_results": [],
-        "answer": "",
     }
-    final_state = graph.invoke(state)
+    
+    # checkpointer 사용을 위한 config (thread_id 필요)
+    config = {"configurable": {"thread_id": "run-1"}}
+    
+    final_state = graph.invoke(state, config=config)
     print("\n=== Final Answer ===\n")
-    print(final_state["answer"])
+    print(final_state.get("final_answer", "답변을 생성하지 못했습니다."))
+    
+
+# def run_once(user_query: str):
+#     graph = build_graph()
+#     state = {
+#         "user_query": user_query,
+#         "history": [],
+#         "plan": "",
+#         "search_query": "",
+#         "search_results": [],
+#         "answer": "",
+#     }
+#     final_state = graph.invoke(state)
+#     print("\n=== Final Answer ===\n")
+#     print(final_state["answer"])
 
 
 if __name__ == "__main__":
