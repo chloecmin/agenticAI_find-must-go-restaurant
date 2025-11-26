@@ -3,3 +3,5 @@ langgraph-cli[inmem]
 langchain-openai>=0.2.0
 elasticsearch
 python-dotenv
+fastapi
+uvicorn[standard]
