@@ -49,7 +49,7 @@ export default function Home() {
       const data = await response.json();
       setMessages((prev) => [
         ...prev,
-        { role: "assistant", content: data.response || data.message || JSON.stringify(data) },
+        { role: "assistant", content: data.answer || data.response || data.message || JSON.stringify(data) },
       ]);
     } catch (err) {
       setError("응답을 받는데 실패했습니다. 다시 시도해주세요.");
