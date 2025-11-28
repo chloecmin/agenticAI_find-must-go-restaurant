@@ -1,4 +1,5 @@
 from langgraph.graph import StateGraph, END
+from langgraph.checkpoint.memory import MemorySaver
 
 from .nodes import (
     AgentState,
@@ -234,4 +235,11 @@ def build_graph():
     
     workflow.add_edge("final_output", END)
 
-    return workflow.compile()
+
+    # MEMORY SAVER 추가
+    memory = MemorySaver()
+
+    # checkpointer 적용해 compile
+    app = workflow.compile(checkpointer=memory)
+
+    return app
