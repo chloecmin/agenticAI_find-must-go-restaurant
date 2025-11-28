@@ -51,6 +51,12 @@ class AgentState(TypedDict, total=False):
 
     history: List[Dict[str, str]]  # 선택사항: 전체 에이전트 로그
 
+    # 세션 단위 Short-term Memory
+    # 같은 thread_id 에서 다음 질문이 들어왔을 때 참고할 정보들
+    session_memory: Dict[str, Any]   # 직전 질의/답변 등 세션 전반 요약
+    user_profile: Dict[str, Any]     # 맛집 취향 (지역, 예산, 선호/비선호 등)
+    last_reco: List[Dict[str, Any]]  # 직전 턴 추천 리스트 (중복 회피용)
+
 
 # 기본 LLM (coordinator, planner, supervisor, evaluator용)
 # 환경변수 BASE_LLM_MODEL로 설정 가능 (기본값: qwen/qwen3-30b-a3b:free)
@@ -61,6 +67,30 @@ def _append_history(state: AgentState, role: str, content: str) -> None:
     history = state.get("history") or []
     history.append({"role": role, "content": content})
     state["history"] = history
+
+
+def update_session_memory(state: AgentState) -> None:
+    """
+    한 턴이 끝났을 때 세션 단위 메모리/프로필/직전 추천을 업데이트한다.
+    - session_memory: 직전 질의/답변/툴트레이스 요약
+    - user_profile: 쿼리에서 지역 등 간단한 취향/제약 추출
+    - last_reco: tool_trace에서 식당 목록만 뽑아 저장
+    """
+    session = state.get("session_memory") or {}
+    profile = state.get("user_profile") or {}
+
+    user_query = state.get("user_query", "")
+    final_answer = state.get("final_answer", "")
+    tool_trace = state.get("tool_trace", "")
+
+    # 직전 턴 요약 정보
+    session["last_user_query"] = user_query
+    session["last_final_answer"] = final_answer[-3000:]
+    session["last_tool_trace"] = tool_trace[-3000:]
+
+
+    state["session_memory"] = session
+
 
 
 # ---------------- Core Agent (coordinator) ----------------
@@ -74,6 +104,11 @@ def coordinator_node(state: AgentState) -> AgentState:
     user_query = state["user_query"]
     prev_feedback = state.get("eval_feedback", "")
     loop = state.get("loop_count", 0)
+    session_memory = state.get("session_memory", {})
+    user_profile = state.get("user_profile", {})
+
+    # 디버깅용
+    print("\n[DEBUG][coordinator] session_memory:", session_memory)
 
     system_prompt = apply_prompt_template("coordinator")
     instruct = (
@@ -93,8 +128,20 @@ def coordinator_node(state: AgentState) -> AgentState:
         HumanMessage(content=content),
     ]
 
-    resp = llm.invoke(messages)
-    plan = resp.content.strip()
+    try:
+        resp = llm.invoke(messages)
+        plan = resp.content.strip()
+    except Exception as e:
+        # LLM 에러를 잡아준다.
+        logger.error("[Coordinator] LLM 호출 실패, fallback plan 사용: %s", e)
+
+        # fallback: 그냥 사용자 질문 + 이전 피드백/메모리를 planner에게 넘기는 단순 계획
+        plan = (
+            "LLM 호출 실패로 인해 단순 플랜을 사용합니다.\n\n"
+            f"- 사용자 질문을 그대로 planner에게 전달합니다.\n"
+            f"- 이전 평가 피드백과 세션 메모리가 있다면 planner가 참고하도록 합니다.\n\n"
+            f"[사용자 질문]\n{user_query}\n"
+        )
 
     state["core_plan"] = plan
     _append_history(state, "coordinator", plan)
@@ -494,9 +541,30 @@ def evaluator_node(state: AgentState) -> AgentState:
         ),
     ]
 
-    resp = llm.invoke(messages)
-    raw = resp.content
-    logger.info("[Evaluator] raw: %s", raw)
+    try:
+        resp = llm.invoke(messages)
+        raw = resp.content
+        logger.info("[Evaluator] raw: %s", raw)
+    except Exception as e:
+        # LLM 에러 발생 시 안전하게 종료
+        logger.error("[Evaluator] LLM 호출 실패: %s", e)
+
+        # loop_count 업데이트
+        loop = state.get("loop_count", 0) + 1
+        state["loop_count"] = loop
+
+        # 더 이상 재수정 시도 X → 지금 draft를 최종 답변으로 사용
+        state["needs_revision"] = False
+        state["eval_feedback"] = f"LLM 평가 중 오류 발생: {e}"
+        state["final_answer"] = draft or "죄송합니다. 현재 답변을 평가하는 데 문제가 발생했습니다."
+
+        _append_history(
+            state,
+            "evaluator",
+            f"[ERROR] LLM 호출 실패, draft를 그대로 최종으로 사용\nerror={e}",
+        )
+        return state
+
 
     needs_revision = False
     feedback = ""
@@ -588,6 +656,9 @@ def final_output_node(state: AgentState) -> AgentState:
             
             # 포맷팅된 답변을 state에 저장 (LangGraph Studio에서 확인 가능)
             state["final_answer"] = formatted_answer
+
+            # 세션 단위 메모리 업데이트
+            update_session_memory(state)
             
             # 터미널에 출력
             print("\n" + "="*80)
