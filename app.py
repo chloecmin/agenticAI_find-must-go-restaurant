@@ -2,6 +2,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from graph.builder import build_graph
 
@@ -9,6 +10,15 @@ app = FastAPI(
     title="맛집 추천 API",
     description="사용자 쿼리를 받아 맛집을 추천하는 AI 에이전트 API",
     version="1.0.0"
+)
+
+# CORS 설정
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # 모든 origin 허용
+    allow_credentials=True,
+    allow_methods=["*"],  # 모든 HTTP 메소드 허용
+    allow_headers=["*"],  # 모든 헤더 허용
 )
 
 
