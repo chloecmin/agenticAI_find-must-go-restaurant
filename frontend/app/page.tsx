@@ -1,6 +1,8 @@
 "use client";
 
 import { useState, useRef, useEffect } from "react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 
 interface Message {
   role: "user" | "assistant";
@@ -12,6 +14,7 @@ export default function Home() {
   const [input, setInput] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [sessionId, setSessionId] = useState<string | null>(null);  // 세션 ID 상태 추가
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   const scrollToBottom = () => {
@@ -33,13 +36,22 @@ export default function Home() {
     setIsLoading(true);
 
     try {
+      const requestBody: { user_query: string; session_id?: string } = {
+        user_query: userMessage,
+      };
+
+      // 세션 ID가 있으면 함께 전송
+      if (sessionId) {
+        requestBody.session_id = sessionId;
+      }
+
       const response = await fetch("http://34.59.147.161:8000/query", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
           accept: "application/json",
         },
-        body: JSON.stringify({ user_query: userMessage }),
+        body: JSON.stringify(requestBody),
       });
 
       if (!response.ok) {
@@ -47,6 +59,13 @@ export default function Home() {
       }
 
       const data = await response.json();
+
+      // 세션 ID 저장 (첫 응답이거나 새 세션인 경우)
+      if (data.session_id && data.session_id !== sessionId) {
+        setSessionId(data.session_id);
+        console.log("Session ID:", data.session_id);
+      }
+
       setMessages((prev) => [
         ...prev,
         { role: "assistant", content: data.answer || data.response || data.message || JSON.stringify(data) },
@@ -156,7 +175,15 @@ export default function Home() {
                       : "border border-gray-200 bg-white/80 text-gray-800 backdrop-blur-sm dark:border-gray-700 dark:bg-gray-800/80 dark:text-gray-100"
                   }`}
                 >
-                  <p className="whitespace-pre-wrap break-words leading-relaxed">{message.content}</p>
+                  {message.role === "user" ? (
+                    <p className="whitespace-pre-wrap break-words leading-relaxed">{message.content}</p>
+                  ) : (
+                    <div className="prose prose-sm max-w-none dark:prose-invert prose-headings:font-bold prose-h1:text-2xl prose-h2:text-xl prose-h3:text-lg prose-p:leading-relaxed prose-a:text-indigo-600 dark:prose-a:text-indigo-400 prose-a:no-underline hover:prose-a:underline prose-strong:font-semibold prose-code:bg-gray-100 dark:prose-code:bg-gray-800 prose-code:px-1 prose-code:py-0.5 prose-code:rounded prose-pre:bg-gray-100 dark:prose-pre:bg-gray-800 prose-pre:p-4 prose-pre:rounded-lg prose-ul:list-disc prose-ol:list-decimal prose-li:my-1">
+                      <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                        {message.content}
+                      </ReactMarkdown>
+                    </div>
+                  )}
                   {/* Decorative corner */}
                   <div className={`absolute ${message.role === "user" ? "-right-1 top-2" : "-left-1 top-2"} h-3 w-3 rotate-45 ${
                     message.role === "user"
