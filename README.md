@@ -29,6 +29,10 @@ TOOL_LLM_MODEL="your Model"
 # -------- ES INFO --------
 ES_HOST="your Host address"
 ES_INDEX="your index"
+ES_API_KEY="your API key (optional)"
+
+# -------- Embedding Model (for Hybrid Search) --------
+OPENROUTER_EMBEDDING_MODEL="baai/bge-m3"  # 기본값: baai/bge-m3
 
 # -------- Google Place INFO --------
 GOOGLE_PLACES_API_KEY="your Key"
