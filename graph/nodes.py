@@ -340,7 +340,12 @@ def search_agent_node(state: AgentState) -> AgentState:
         state["tool_trace"] = "[Search Agent 결과]\n" + trace
     
     _append_history(state, "search_agent", trace)
-    logger.info("[SearchAgent] trace: %s", trace[:300])
+    
+    # 전체 trace를 로그에 출력
+    logger.info("[SearchAgent] ===== 전체 Trace 시작 (총 %d자) =====", len(trace))
+    logger.info("[SearchAgent] 전체 내용:\n%s", trace)
+    logger.info("[SearchAgent] ===== 전체 Trace 종료 =====")
+    
     return state
 
 
@@ -390,7 +395,12 @@ def places_agent_node(state: AgentState) -> AgentState:
         state["tool_trace"] = "[Places Agent 결과]\n" + trace
     
     _append_history(state, "places_agent", trace)
-    logger.info("[PlacesAgent] trace: %s", trace[:300])
+    
+    # 전체 trace를 로그에 출력
+    logger.info("[PlacesAgent] ===== 전체 Trace 시작 (총 %d자) =====", len(trace))
+    logger.info("[PlacesAgent] 전체 내용:\n%s", trace)
+    logger.info("[PlacesAgent] ===== 전체 Trace 종료 =====")
+    
     return state
 
 
@@ -440,7 +450,12 @@ def budget_agent_node(state: AgentState) -> AgentState:
         state["tool_trace"] = "[Budget Agent 결과]\n" + trace
     
     _append_history(state, "budget_agent", trace)
-    logger.info("[BudgetAgent] trace: %s", trace[:300])
+    
+    # 전체 trace를 로그에 출력
+    logger.info("[BudgetAgent] ===== 전체 Trace 시작 (총 %d자) =====", len(trace))
+    logger.info("[BudgetAgent] 전체 내용:\n%s", trace)
+    logger.info("[BudgetAgent] ===== 전체 Trace 종료 =====")
+    
     return state
 
 
