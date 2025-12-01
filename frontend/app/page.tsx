@@ -35,6 +35,10 @@ export default function Home() {
     setMessages((prev) => [...prev, { role: "user", content: userMessage }]);
     setIsLoading(true);
 
+    // 빈 assistant 메시지를 추가하고 인덱스 저장
+    const assistantMessageIndex = messages.length + 1;
+    setMessages((prev) => [...prev, { role: "assistant", content: "" }]);
+
     try {
       const requestBody: { user_query: string; session_id?: string } = {
         user_query: userMessage,
@@ -45,11 +49,10 @@ export default function Home() {
         requestBody.session_id = sessionId;
       }
 
-      const response = await fetch("http://34.59.147.161:8000/query", {
+      const response = await fetch("http://34.134.58.155:8000/query/stream", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          accept: "application/json",
         },
         body: JSON.stringify(requestBody),
       });
@@ -58,21 +61,102 @@ export default function Home() {
         throw new Error("서버 응답 오류");
       }
 
-      const data = await response.json();
+      const reader = response.body?.getReader();
+      const decoder = new TextDecoder();
 
-      // 세션 ID 저장 (첫 응답이거나 새 세션인 경우)
-      if (data.session_id && data.session_id !== sessionId) {
-        setSessionId(data.session_id);
-        console.log("Session ID:", data.session_id);
+      if (!reader) {
+        throw new Error("스트림을 읽을 수 없습니다.");
       }
 
-      setMessages((prev) => [
-        ...prev,
-        { role: "assistant", content: data.answer || data.response || data.message || JSON.stringify(data) },
-      ]);
+      let buffer = "";
+      let currentContent = "";
+
+      while (true) {
+        const { done, value } = await reader.read();
+
+        if (done) {
+          break;
+        }
+
+        // 디코딩된 청크를 버퍼에 추가
+        buffer += decoder.decode(value, { stream: true });
+
+        // 완전한 이벤트들을 처리
+        const lines = buffer.split("\n");
+        buffer = lines.pop() || ""; // 마지막 불완전한 줄은 버퍼에 유지
+
+        for (const line of lines) {
+          if (line.startsWith("data: ")) {
+            try {
+              const jsonData = JSON.parse(line.slice(6));
+
+              if (jsonData.type === "session_id") {
+                // 세션 ID 저장
+                if (jsonData.session_id && jsonData.session_id !== sessionId) {
+                  setSessionId(jsonData.session_id);
+                  console.log("Session ID:", jsonData.session_id);
+                }
+              } else if (jsonData.type === "node_update") {
+                // 노드 업데이트 처리
+                if (jsonData.data.final_answer) {
+                  currentContent = jsonData.data.final_answer;
+                  setMessages((prev) => {
+                    const newMessages = [...prev];
+                    newMessages[assistantMessageIndex] = {
+                      role: "assistant",
+                      content: currentContent,
+                    };
+                    return newMessages;
+                  });
+                } else if (jsonData.data.plan) {
+                  currentContent = `**계획 수립 중...**\n\n${jsonData.data.plan}`;
+                  setMessages((prev) => {
+                    const newMessages = [...prev];
+                    newMessages[assistantMessageIndex] = {
+                      role: "assistant",
+                      content: currentContent,
+                    };
+                    return newMessages;
+                  });
+                } else if (jsonData.data.answer) {
+                  currentContent = jsonData.data.answer;
+                  setMessages((prev) => {
+                    const newMessages = [...prev];
+                    newMessages[assistantMessageIndex] = {
+                      role: "assistant",
+                      content: currentContent,
+                    };
+                    return newMessages;
+                  });
+                }
+              } else if (jsonData.type === "done") {
+                console.log("스트리밍 완료");
+              } else if (jsonData.type === "error") {
+                throw new Error(jsonData.error);
+              }
+            } catch (parseError) {
+              console.error("JSON 파싱 오류:", parseError);
+            }
+          }
+        }
+      }
+
+      // 내용이 비어있으면 기본 메시지 설정
+      if (!currentContent) {
+        setMessages((prev) => {
+          const newMessages = [...prev];
+          newMessages[assistantMessageIndex] = {
+            role: "assistant",
+            content: "답변을 생성하지 못했습니다.",
+          };
+          return newMessages;
+        });
+      }
     } catch (err) {
       setError("응답을 받는데 실패했습니다. 다시 시도해주세요.");
       console.error("Error:", err);
+      // 에러 발생 시 빈 메시지 제거
+      setMessages((prev) => prev.slice(0, -1));
     } finally {
       setIsLoading(false);
     }
