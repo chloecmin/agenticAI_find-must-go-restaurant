@@ -54,8 +54,8 @@ class AgentState(TypedDict, total=False):
     # 세션 단위 Short-term Memory
     # 같은 thread_id 에서 다음 질문이 들어왔을 때 참고할 정보들
     session_memory: Dict[str, Any]   # 직전 질의/답변 등 세션 전반 요약
-    user_profile: Dict[str, Any]     # 맛집 취향 (지역, 예산, 선호/비선호 등)
-    last_reco: List[Dict[str, Any]]  # 직전 턴 추천 리스트 (중복 회피용)
+    # user_profile: Dict[str, Any]     # 맛집 취향 (지역, 예산, 선호/비선호 등) 구현 못함
+    # last_reco: List[Dict[str, Any]]  # 직전 턴 추천 리스트 (중복 회피용) 구현 못함
 
 
 # 기본 LLM (coordinator, planner, supervisor, evaluator용)
@@ -73,11 +73,11 @@ def update_session_memory(state: AgentState) -> None:
     """
     한 턴이 끝났을 때 세션 단위 메모리/프로필/직전 추천을 업데이트한다.
     - session_memory: 직전 질의/답변/툴트레이스 요약
-    - user_profile: 쿼리에서 지역 등 간단한 취향/제약 추출
-    - last_reco: tool_trace에서 식당 목록만 뽑아 저장
+    - user_profile: 쿼리에서 지역 등 간단한 취향/제약 추출 (구현 못함)
+    - last_reco: tool_trace에서 식당 목록만 뽑아 저장 (구현 못함)
     """
     session = state.get("session_memory") or {}
-    profile = state.get("user_profile") or {}
+    # profile = state.get("user_profile") or {} 구현 못함
 
     user_query = state.get("user_query", "")
     final_answer = state.get("final_answer", "")
@@ -87,7 +87,6 @@ def update_session_memory(state: AgentState) -> None:
     session["last_user_query"] = user_query
     session["last_final_answer"] = final_answer[-3000:]
     session["last_tool_trace"] = tool_trace[-3000:]
-
 
     state["session_memory"] = session
 
