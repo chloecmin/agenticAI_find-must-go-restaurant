@@ -743,10 +743,7 @@ import re
 from elasticsearch import Elasticsearch, helpers
 
 
-OUTPUT_CSV = "restaurant_menus.csv"
-
-# 여기 위에 네가 만든 SAMPLE_MENUS_BY_CUISINE 그대로 둠
-# SAMPLE_MENUS_BY_CUISINE = { ... }
+OUTPUT_CSV = "data/restaurants_menus.csv"
 
 
 def parse_cuisines(value):
