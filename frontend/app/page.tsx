@@ -35,9 +35,8 @@ export default function Home() {
     setMessages((prev) => [...prev, { role: "user", content: userMessage }]);
     setIsLoading(true);
 
-    // 빈 assistant 메시지를 추가하고 인덱스 저장
-    const assistantMessageIndex = messages.length + 1;
-    setMessages((prev) => [...prev, { role: "assistant", content: "" }]);
+    // 빈 assistant 메시지를 추가
+    setMessages((prev) => [...prev, { role: "assistant", content: "🔄 처리 중..." }]);
 
     try {
       const requestBody: { user_query: string; session_id?: string } = {
@@ -69,7 +68,9 @@ export default function Home() {
       }
 
       let buffer = "";
-      let currentContent = "";
+      let statusText = "🔄 처리 중...";
+      let accumulatedSteps: string[] = [];
+      let finalAnswer = "";
 
       while (true) {
         const { done, value } = await reader.read();
@@ -96,41 +97,75 @@ export default function Home() {
                   setSessionId(jsonData.session_id);
                   console.log("Session ID:", jsonData.session_id);
                 }
+              } else if (jsonData.type === "node_start") {
+                // 노드 시작
+                statusText = `🔄 ${jsonData.message}`;
+                accumulatedSteps.push(`**${jsonData.message}**`);
+
+                const displayContent = accumulatedSteps.join("\n\n") + (finalAnswer ? `\n\n---\n\n${finalAnswer}` : "");
+                setMessages((prev) => {
+                  const newMessages = [...prev];
+                  newMessages[newMessages.length - 1] = {
+                    role: "assistant",
+                    content: displayContent || statusText,
+                  };
+                  return newMessages;
+                });
               } else if (jsonData.type === "node_update") {
                 // 노드 업데이트 처리
+                let stepContent = "";
+
                 if (jsonData.data.final_answer) {
-                  currentContent = jsonData.data.final_answer;
-                  setMessages((prev) => {
-                    const newMessages = [...prev];
-                    newMessages[assistantMessageIndex] = {
-                      role: "assistant",
-                      content: currentContent,
-                    };
-                    return newMessages;
-                  });
+                  finalAnswer = jsonData.data.final_answer;
                 } else if (jsonData.data.plan) {
-                  currentContent = `**계획 수립 중...**\n\n${jsonData.data.plan}`;
-                  setMessages((prev) => {
-                    const newMessages = [...prev];
-                    newMessages[assistantMessageIndex] = {
-                      role: "assistant",
-                      content: currentContent,
-                    };
-                    return newMessages;
-                  });
+                  stepContent = `📋 **계획**: ${jsonData.data.plan.substring(0, 200)}${jsonData.data.plan.length > 200 ? "..." : ""}`;
+                  accumulatedSteps.push(stepContent);
+                } else if (jsonData.data.subtask) {
+                  stepContent = `📝 **작업**: ${jsonData.data.subtask}`;
+                  accumulatedSteps.push(stepContent);
+                } else if (jsonData.data.tool_trace) {
+                  stepContent = `🔍 **검색 결과**: ${jsonData.data.tool_trace.substring(0, 150)}...`;
+                  accumulatedSteps.push(stepContent);
                 } else if (jsonData.data.answer) {
-                  currentContent = jsonData.data.answer;
+                  stepContent = `💬 **중간 답변**: ${jsonData.data.answer.substring(0, 150)}...`;
+                  accumulatedSteps.push(stepContent);
+                }
+
+                const displayContent = accumulatedSteps.join("\n\n") + (finalAnswer ? `\n\n---\n\n${finalAnswer}` : "");
+                setMessages((prev) => {
+                  const newMessages = [...prev];
+                  newMessages[newMessages.length - 1] = {
+                    role: "assistant",
+                    content: displayContent || statusText,
+                  };
+                  return newMessages;
+                });
+              } else if (jsonData.type === "node_complete") {
+                // 노드 완료
+                accumulatedSteps[accumulatedSteps.length - 1] = accumulatedSteps[accumulatedSteps.length - 1].replace("🔄", "✅");
+
+                const displayContent = accumulatedSteps.join("\n\n") + (finalAnswer ? `\n\n---\n\n${finalAnswer}` : "");
+                setMessages((prev) => {
+                  const newMessages = [...prev];
+                  newMessages[newMessages.length - 1] = {
+                    role: "assistant",
+                    content: displayContent,
+                  };
+                  return newMessages;
+                });
+              } else if (jsonData.type === "done") {
+                console.log("스트리밍 완료");
+                // 최종 답변만 표시
+                if (finalAnswer) {
                   setMessages((prev) => {
                     const newMessages = [...prev];
-                    newMessages[assistantMessageIndex] = {
+                    newMessages[newMessages.length - 1] = {
                       role: "assistant",
-                      content: currentContent,
+                      content: finalAnswer,
                     };
                     return newMessages;
                   });
                 }
-              } else if (jsonData.type === "done") {
-                console.log("스트리밍 완료");
               } else if (jsonData.type === "error") {
                 throw new Error(jsonData.error);
               }
@@ -142,10 +177,10 @@ export default function Home() {
       }
 
       // 내용이 비어있으면 기본 메시지 설정
-      if (!currentContent) {
+      if (!finalAnswer && accumulatedSteps.length === 0) {
         setMessages((prev) => {
           const newMessages = [...prev];
-          newMessages[assistantMessageIndex] = {
+          newMessages[newMessages.length - 1] = {
             role: "assistant",
             content: "답변을 생성하지 못했습니다.",
           };
@@ -279,24 +314,6 @@ export default function Home() {
             </div>
           ))}
 
-          {isLoading && (
-            <div className="flex animate-fade-in justify-start">
-              <div className="flex items-start gap-3">
-                <div className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-lg bg-gradient-to-br from-emerald-500 to-teal-600 shadow-md">
-                  <svg className="h-5 w-5 animate-pulse text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z" />
-                  </svg>
-                </div>
-                <div className="rounded-2xl border border-gray-200 bg-white/80 px-6 py-4 shadow-lg backdrop-blur-sm dark:border-gray-700 dark:bg-gray-800/80">
-                  <div className="flex items-center space-x-2">
-                    <div className="h-2.5 w-2.5 animate-bounce rounded-full bg-gradient-to-r from-indigo-500 to-purple-500"></div>
-                    <div className="h-2.5 w-2.5 animate-bounce rounded-full bg-gradient-to-r from-purple-500 to-pink-500" style={{ animationDelay: "0.2s" }}></div>
-                    <div className="h-2.5 w-2.5 animate-bounce rounded-full bg-gradient-to-r from-pink-500 to-indigo-500" style={{ animationDelay: "0.4s" }}></div>
-                  </div>
-                </div>
-              </div>
-            </div>
-          )}
 
           {error && (
             <div className="animate-shake rounded-2xl border border-red-200 bg-gradient-to-r from-red-50 to-pink-50 px-5 py-4 shadow-lg dark:border-red-800 dark:from-red-900/30 dark:to-pink-900/30">
