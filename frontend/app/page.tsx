@@ -68,8 +68,7 @@ export default function Home() {
       }
 
       let buffer = "";
-      let statusText = "🔄 처리 중...";
-      let accumulatedSteps: string[] = [];
+      let currentStatus = "🔄 처리 중...";
       let finalAnswer = "";
 
       while (true) {
@@ -98,58 +97,75 @@ export default function Home() {
                   console.log("Session ID:", jsonData.session_id);
                 }
               } else if (jsonData.type === "node_start") {
-                // 노드 시작
-                statusText = `🔄 ${jsonData.message}`;
-                accumulatedSteps.push(`**${jsonData.message}**`);
+                // 노드 시작 - 현재 상태만 업데이트
+                currentStatus = jsonData.message;
 
-                const displayContent = accumulatedSteps.join("\n\n") + (finalAnswer ? `\n\n---\n\n${finalAnswer}` : "");
                 setMessages((prev) => {
                   const newMessages = [...prev];
                   newMessages[newMessages.length - 1] = {
                     role: "assistant",
-                    content: displayContent || statusText,
+                    content: currentStatus,
                   };
                   return newMessages;
                 });
               } else if (jsonData.type === "node_update") {
                 // 노드 업데이트 처리
-                let stepContent = "";
-
                 if (jsonData.data.final_answer) {
                   finalAnswer = jsonData.data.final_answer;
                 } else if (jsonData.data.plan) {
-                  stepContent = `📋 **계획**: ${jsonData.data.plan.substring(0, 200)}${jsonData.data.plan.length > 200 ? "..." : ""}`;
-                  accumulatedSteps.push(stepContent);
+                  currentStatus = `🔄 ${jsonData.node_kr || jsonData.node}: 계획 수립 중...\n\n${jsonData.data.plan.substring(0, 200)}${jsonData.data.plan.length > 200 ? "..." : ""}`;
+
+                  setMessages((prev) => {
+                    const newMessages = [...prev];
+                    newMessages[newMessages.length - 1] = {
+                      role: "assistant",
+                      content: currentStatus,
+                    };
+                    return newMessages;
+                  });
                 } else if (jsonData.data.subtask) {
-                  stepContent = `📝 **작업**: ${jsonData.data.subtask}`;
-                  accumulatedSteps.push(stepContent);
+                  currentStatus = `🔄 ${jsonData.node_kr || jsonData.node}: ${jsonData.data.subtask}`;
+
+                  setMessages((prev) => {
+                    const newMessages = [...prev];
+                    newMessages[newMessages.length - 1] = {
+                      role: "assistant",
+                      content: currentStatus,
+                    };
+                    return newMessages;
+                  });
                 } else if (jsonData.data.tool_trace) {
-                  stepContent = `🔍 **검색 결과**: ${jsonData.data.tool_trace.substring(0, 150)}...`;
-                  accumulatedSteps.push(stepContent);
+                  currentStatus = `🔍 ${jsonData.node_kr || jsonData.node}: 검색 중...\n\n${jsonData.data.tool_trace.substring(0, 300)}${jsonData.data.tool_trace.length > 300 ? "..." : ""}`;
+
+                  setMessages((prev) => {
+                    const newMessages = [...prev];
+                    newMessages[newMessages.length - 1] = {
+                      role: "assistant",
+                      content: currentStatus,
+                    };
+                    return newMessages;
+                  });
                 } else if (jsonData.data.answer) {
-                  stepContent = `💬 **중간 답변**: ${jsonData.data.answer.substring(0, 150)}...`;
-                  accumulatedSteps.push(stepContent);
+                  currentStatus = `💬 ${jsonData.node_kr || jsonData.node}: 답변 생성 중...\n\n${jsonData.data.answer.substring(0, 300)}${jsonData.data.answer.length > 300 ? "..." : ""}`;
+
+                  setMessages((prev) => {
+                    const newMessages = [...prev];
+                    newMessages[newMessages.length - 1] = {
+                      role: "assistant",
+                      content: currentStatus,
+                    };
+                    return newMessages;
+                  });
                 }
-
-                const displayContent = accumulatedSteps.join("\n\n") + (finalAnswer ? `\n\n---\n\n${finalAnswer}` : "");
-                setMessages((prev) => {
-                  const newMessages = [...prev];
-                  newMessages[newMessages.length - 1] = {
-                    role: "assistant",
-                    content: displayContent || statusText,
-                  };
-                  return newMessages;
-                });
               } else if (jsonData.type === "node_complete") {
-                // 노드 완료
-                accumulatedSteps[accumulatedSteps.length - 1] = accumulatedSteps[accumulatedSteps.length - 1].replace("🔄", "✅");
+                // 노드 완료 - 완료 표시만
+                currentStatus = `✅ ${jsonData.message}`;
 
-                const displayContent = accumulatedSteps.join("\n\n") + (finalAnswer ? `\n\n---\n\n${finalAnswer}` : "");
                 setMessages((prev) => {
                   const newMessages = [...prev];
                   newMessages[newMessages.length - 1] = {
                     role: "assistant",
-                    content: displayContent,
+                    content: currentStatus,
                   };
                   return newMessages;
                 });
@@ -177,7 +193,7 @@ export default function Home() {
       }
 
       // 내용이 비어있으면 기본 메시지 설정
-      if (!finalAnswer && accumulatedSteps.length === 0) {
+      if (!finalAnswer && !currentStatus) {
         setMessages((prev) => {
           const newMessages = [...prev];
           newMessages[newMessages.length - 1] = {
