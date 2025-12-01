@@ -825,7 +825,7 @@ def main():
             if not cuisine:
                 continue
 
-            # 네가 만든 dict에서 해당 cuisine의 샘플 메뉴 3개 가져오기
+            # dict에서 해당 cuisine의 샘플 메뉴 3개 가져오기
             menus = SAMPLE_MENUS_BY_CUISINE.get(cuisine)
             if not menus:
                 # ES에 있는 cuisine 문자열이 dict 키랑 안 맞으면 스킵됨
@@ -835,10 +835,10 @@ def main():
                 row = {
                     "restaurant_id": restaurant_id,
                     "restaurant_name": restaurant_name,
-                    # 👉 여기 menu_type 에는 ES의 cuisine 값 그대로
+                    # 여기 menu_type 에는 ES의 cuisine 값 그대로
                     "menu_type": cuisine,
                     "menu_name": menu_name,
-                    # 👉 main / side / dessert / drink 등
+                    # main / side / dessert / drink 등
                     "menu_category": menu_category,
                     "price": generate_price(),
                     "is_recommended": generate_is_recommended(p=0.8),
