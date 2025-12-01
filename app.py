@@ -102,27 +102,75 @@ async def get_recommendation_stream(request: QueryRequest):
             async for event in graph.astream(state, config=config):
                 # event는 {"node_name": {...}} 형식
                 for node_name, node_state in event.items():
+                    # 노드 시작 알림
+                    node_start_event = {
+                        "type": "node_start",
+                        "node": node_name,
+                        "message": f"🔄 {node_name} 실행 중..."
+                    }
+                    yield f"data: {json.dumps(node_start_event, ensure_ascii=False)}\n\n"
+
+                    # 노드별 한글 이름 매핑
+                    node_names_kr = {
+                        "coordinator": "코디네이터",
+                        "planner": "계획 수립",
+                        "search_agent": "검색 에이전트",
+                        "places_agent": "장소 정보 수집",
+                        "supervisor": "최종 답변 생성",
+                        "budget_agent": "예산 분석",
+                    }
+
                     # 각 노드의 상태를 스트리밍
                     event_data = {
                         "type": "node_update",
                         "node": node_name,
+                        "node_kr": node_names_kr.get(node_name, node_name),
                         "data": {}
                     }
 
+                    # 모든 상태 데이터를 전송
+                    has_data = False
+
                     # final_answer가 있으면 전송
-                    if "final_answer" in node_state:
+                    if "final_answer" in node_state and node_state["final_answer"]:
                         event_data["data"]["final_answer"] = node_state["final_answer"]
-                        yield f"data: {json.dumps(event_data)}\n\n"
+                        has_data = True
 
                     # plan이 있으면 전송
-                    elif "plan" in node_state and node_state["plan"]:
+                    if "plan" in node_state and node_state["plan"]:
                         event_data["data"]["plan"] = node_state["plan"]
-                        yield f"data: {json.dumps(event_data)}\n\n"
+                        has_data = True
+
+                    # subtask가 있으면 전송
+                    if "subtask" in node_state and node_state["subtask"]:
+                        event_data["data"]["subtask"] = node_state["subtask"]
+                        has_data = True
+
+                    # tool_trace가 있으면 전송 (검색 결과 등)
+                    if "tool_trace" in node_state and node_state["tool_trace"]:
+                        # 너무 길면 일부만 전송
+                        trace = node_state["tool_trace"]
+                        if len(trace) > 1000:
+                            trace = trace[:1000] + "... (생략)"
+                        event_data["data"]["tool_trace"] = trace
+                        has_data = True
 
                     # answer가 있으면 전송
-                    elif "answer" in node_state and node_state["answer"]:
+                    if "answer" in node_state and node_state["answer"]:
                         event_data["data"]["answer"] = node_state["answer"]
-                        yield f"data: {json.dumps(event_data)}\n\n"
+                        has_data = True
+
+                    # 데이터가 있으면 전송
+                    if has_data:
+                        yield f"data: {json.dumps(event_data, ensure_ascii=False)}\n\n"
+
+                    # 노드 완료 알림
+                    node_complete_event = {
+                        "type": "node_complete",
+                        "node": node_name,
+                        "message": f"✅ {node_names_kr.get(node_name, node_name)} 완료"
+                    }
+                    yield f"data: {json.dumps(node_complete_event, ensure_ascii=False)}\n\n"
 
                 # 약간의 딜레이 (클라이언트가 이벤트를 처리할 수 있도록)
                 await asyncio.sleep(0.01)
