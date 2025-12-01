@@ -445,7 +445,7 @@ def menu_price_tool(restaurant_name: str) -> str:
     LLM은 이 정보를 보고 어떤 메뉴를 몇 개 시킬지 결정한 뒤,
     calculator_tool을 이용해 예산을 계산할 수 있다.
     """
-    csv_path = os.getenv("MENU_CSV_PATH", "data/restaurant_menus_mock.csv")
+    csv_path = os.getenv("MENU_CSV_PATH", "data/restaurants_menus_mock.csv")
 
     rows = load_menus_for_restaurant(restaurant_name=restaurant_name, csv_path=csv_path)
     if not rows:
@@ -456,8 +456,24 @@ def menu_price_tool(restaurant_name: str) -> str:
         menu_name = r.get("menu_name")
         menu_type = r.get("menu_type")
         price = r.get("price")
-        is_rec = r.get("is_recommended", "").upper() == "Y"
+
+        # -- is_recommended 처리 (0/1, "0"/"1", "Y"/"N", True/False 모두 대응) --
+        value = r.get("is_recommended", 0)
+
+        # 0/1 int, "0"/"1", "Y"/"N" 모두 처리
+        if isinstance(value, str):
+            is_rec = value.upper() in ("Y", "1", "TRUE")
+        else:
+            is_rec = bool(value)
+
         rec_flag = " (추천)" if is_rec else ""
+
+        # price가 문자열이면 숫자로 캐스팅
+        try:
+            price_int = int(price)
+        except Exception:
+            price_int = price
+
         lines.append(f"- {menu_name} ({menu_type}, {price}원){rec_flag}")
 
     return "\n".join(lines)
