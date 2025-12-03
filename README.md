@@ -18,7 +18,6 @@ pip install -r requirements.txt
 프로젝트 루트에 `.env` 파일을 생성하고 다음 환경변수를 설정:
 ```bash
 # -------- LLM API KEY --------
-OPENAI_API_KEY="your Key"
 OPENROUTER_API_KEY="your Key"
 LANGCHAIN_API_KEY="your Key"
 
@@ -32,15 +31,17 @@ ES_INDEX="your index"
 ES_API_KEY="your API key (optional)"
 
 # -------- Embedding Model (for Hybrid Search) --------
-OPENROUTER_EMBEDDING_MODEL="baai/bge-m3"  # 기본값: baai/bge-m3
+OPENROUTER_EMBEDDING_MODEL="your Model"  # 기본값: baai/bge-m3
 
 # -------- Google Place INFO --------
 GOOGLE_PLACES_API_KEY="your Key"
-GOOGLE_PLACES_REGION="your region"
+
+# -------- Menu INFO--------
+MENU_CSV_PATH = "data/restaurants_menus.csv"
 ```
 
 3. 실행
 ```bash
-python main.py --user_query "홍대에서 우동 맛집 찾고 2개 먹을 때 가격 알려줘"
+python main.py --stream --user_query "인도 구르가온에서 가장 평점 높은 한식당 찾아줘"
 ``` 
 ---
