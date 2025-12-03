@@ -148,13 +148,13 @@ def sub_agent_router(state: AgentState) -> str:
 def eval_router(state: AgentState) -> str:
     """
     evaluator에서 다음으로 어디로 갈지 결정:
-    - needs_revision=True 이고 loop_count < 3 → coordinator로 다시 (최대 3번: 첫 실행 + 재시도 2번)
+    - needs_revision=True 이고 loop_count < 2 → coordinator로 다시 (최대 2번: 첫 실행 + 재시도 1번)
     - needs_revision=False → final_output으로 가서 답변 출력
     """
     needs_revision = state.get("needs_revision", False)
     loop = state.get("loop_count", 0)
 
-    if needs_revision and loop < 3:
+    if needs_revision and loop < 2:
         return "retry"
     return "final_output"
 
