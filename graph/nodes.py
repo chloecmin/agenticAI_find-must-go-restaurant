@@ -53,9 +53,9 @@ class AgentState(TypedDict, total=False):
 
     # 세션 단위 Short-term Memory
     # 같은 thread_id 에서 다음 질문이 들어왔을 때 참고할 정보들
-    session_memory: Dict[str, Any]   # 직전 질의/답변 등 세션 전반 요약
+    session_memory: Dict[str, Any]   # 직전/과거 질의/답변 등 세션 전반 요약
     # user_profile: Dict[str, Any]     # 맛집 취향 (지역, 예산, 선호/비선호 등) 구현 못함
-    # last_reco: List[Dict[str, Any]]  # 직전 턴 추천 리스트 (중복 회피용) 구현 못함
+    # recent_turns: List[Dict[str, Any]]  # 최근 N개 턴 기록 (user_query, final_answer 등)
 
 
 # 기본 LLM (coordinator, planner, supervisor, evaluator용)
@@ -69,15 +69,139 @@ def _append_history(state: AgentState, role: str, content: str) -> None:
     state["history"] = history
 
 
+def _extract_key_info_from_tool_trace(tool_trace: str) -> Dict[str, Any]:
+    """
+    tool_trace를 섹션별로 파싱하여 핵심 정보만 추출합니다.
+    """
+    if not tool_trace:
+        return {}
+    
+    key_info = {
+        "search_results": [],
+        "places_results": [],
+        "budget_results": {},
+    }
+    
+    # 1. Search Agent 결과 추출
+    # [Search Agent 결과] 섹션 또는 [맛집 검색 결과] 섹션 찾기
+    search_patterns = [
+        r'\[Search Agent 결과\](.*?)(?=\n\n\[|$)',
+        r'\[맛집 검색 결과\](.*?)(?=\n\n\[|$)',
+    ]
+    
+    search_content = None
+    for pattern in search_patterns:
+        search_matches = re.findall(pattern, tool_trace, re.DOTALL)
+        if search_matches:
+            search_content = search_matches[-1]  # 가장 최근 결과
+            break
+    
+    if search_content:
+        # 식당 목록 추출: [1] 식당명 (지역, 카테고리) 형식
+        restaurant_pattern = r'\[(\d+)\]\s+([^\n(]+?)(?:\s*\([^)]+\))?'
+        restaurants = re.findall(restaurant_pattern, search_content)
+        for idx, name in restaurants[:5]:  # 최대 5개
+            name = name.strip()
+            # 괄호 안의 지역명 제거
+            name = re.sub(r'\s*\([^)]+\)\s*$', '', name).strip()
+            
+            # 해당 식당의 평점 정보도 추출
+            rating_match = re.search(
+                rf'\[{idx}\].*?평점:\s*([\d.]+)점\s*\((\d+)개 리뷰\)',
+                search_content,
+                re.DOTALL
+            )
+            restaurant_info = {
+                "index": int(idx),
+                "name": name,
+            }
+            if rating_match:
+                restaurant_info["rating"] = rating_match.group(1)
+                restaurant_info["review_count"] = rating_match.group(2)
+            key_info["search_results"].append(restaurant_info)
+    
+    # 2. Places Agent 결과 추출
+    places_pattern = r'\[Places Agent 결과\](.*?)(?=\n\n\[|$)'
+    places_matches = re.findall(places_pattern, tool_trace, re.DOTALL)
+    if places_matches:
+        places_content = places_matches[-1]
+        # 각 식당별 정보 추출
+        restaurant_info_pattern = r'\[Google Places 상세 정보\]\s*([^\n]+)(.*?)(?=\[Google Places|$)'
+        restaurant_infos = re.findall(restaurant_info_pattern, places_content, re.DOTALL)
+        
+        for name, info in restaurant_infos[:5]:  # 최대 5개
+            name = name.strip()
+            place_info = {"name": name}
+            
+            # 주소 추출
+            address_match = re.search(r'주소:\s*([^\n]+)', info)
+            if address_match:
+                place_info["address"] = address_match.group(1).strip()
+            
+            # 평점 추출
+            rating_match = re.search(r'평점:\s*([\d.]+)점\s*\(전체 리뷰\s*(\d+)개\)', info)
+            if rating_match:
+                place_info["rating"] = rating_match.group(1)
+                place_info["review_count"] = rating_match.group(2)
+            
+            # 전화번호 추출
+            phone_match = re.search(r'전화번호:\s*([^\n]+)', info)
+            if phone_match:
+                place_info["phone"] = phone_match.group(1).strip()
+            
+            key_info["places_results"].append(place_info)
+    
+    # 3. Budget Agent 결과 추출 (메뉴 정보는 중요하므로 전체 포함)
+    budget_pattern = r'\[Budget Agent 결과\](.*?)(?=\n\n\[|$)'
+    budget_matches = re.findall(budget_pattern, tool_trace, re.DOTALL)
+    if budget_matches:
+        budget_content = budget_matches[-1]
+        
+        # 식당명 추출 (여러 패턴 지원)
+        restaurant_match = re.search(r'(?:\*\*식당\*\*|식당)[:\s]+([^\n]+)', budget_content)
+        if restaurant_match:
+            key_info["budget_results"]["restaurant"] = restaurant_match.group(1).strip()
+        
+        # 메뉴 목록 추출 (여러 패턴 지원)
+        menu_patterns = [
+            r'(?:선택 메뉴|메뉴 목록)[:\s]*(.*?)(?=\*\*계산식|\*\*총 예산|이 정보|이 메뉴|$)',
+            r'메뉴 목록[:\s]*(.*?)(?=\*\*계산식|\*\*총 예산|이 정보|이 메뉴|$)',
+        ]
+        menu_items = []
+        for menu_pattern in menu_patterns:
+            menu_match = re.search(menu_pattern, budget_content, re.DOTALL)
+            if menu_match:
+                menu_text = menu_match.group(1).strip()
+                # 메뉴 항목 파싱
+                for line in menu_text.split('\n'):
+                    line = line.strip()
+                    if line and (line.startswith('-') or line.startswith('*')):
+                        menu_items.append(line)
+                if menu_items:
+                    break
+        
+        if menu_items:
+            key_info["budget_results"]["menu_items"] = menu_items
+        
+        # 계산식 추출
+        calc_match = re.search(r'(?:\*\*계산식\*\*|계산식)[:\s]+([^\n]+)', budget_content)
+        if calc_match:
+            key_info["budget_results"]["calculation"] = calc_match.group(1).strip()
+        
+        # 총 예산 추출
+        total_match = re.search(r'(?:\*\*총 예산\*\*|총 예산)[:\s]+([^\n]+)', budget_content)
+        if total_match:
+            key_info["budget_results"]["total_budget"] = total_match.group(1).strip()
+    
+    return key_info
+
+
 def update_session_memory(state: AgentState) -> None:
     """
     한 턴이 끝났을 때 세션 단위 메모리/프로필/직전 추천을 업데이트한다.
-    - session_memory: 직전 질의/답변/툴트레이스 요약
-    - user_profile: 쿼리에서 지역 등 간단한 취향/제약 추출 (구현 못함)
-    - last_reco: tool_trace에서 식당 목록만 뽑아 저장 (구현 못함)
+    tool_trace를 섹션별로 파싱하여 핵심 정보만 추출하여 저장합니다.
     """
     session = state.get("session_memory") or {}
-    # profile = state.get("user_profile") or {} 구현 못함
 
     user_query = state.get("user_query", "")
     final_answer = state.get("final_answer", "")
@@ -85,8 +209,103 @@ def update_session_memory(state: AgentState) -> None:
 
     # 직전 턴 요약 정보
     session["last_user_query"] = user_query
-    session["last_final_answer"] = final_answer[-3000:]
-    session["last_tool_trace"] = tool_trace[-3000:]
+    
+    # final_answer는 최대 2000자로 제한 (핵심 정보만)
+    if len(final_answer) > 2000:
+        session["last_final_answer"] = final_answer[:2000] + "..."
+    else:
+        session["last_final_answer"] = final_answer
+    
+    # tool_trace를 섹션별로 파싱하여 핵심 정보만 추출
+    key_info = _extract_key_info_from_tool_trace(tool_trace)
+    session["last_tool_trace_summary"] = key_info
+    
+    # final_answer에서 추천된 식당 목록 추출 (last_reco)
+    last_reco = []
+    if final_answer:
+        # 다양한 패턴 지원: ### 1️⃣ **식당명**, ### 1. **식당명**, [1] 식당명 등
+        patterns = [
+            r'###\s*[1-5][️⃣.]?\s*\*\*([^*]+)\*\*',  # ### 1️⃣ **식당명**
+            r'###\s*[1-5]\.\s*\*\*([^*]+)\*\*',      # ### 1. **식당명**
+            r'\[(\d+)\]\s+\*\*([^*]+)\*\*',          # [1] **식당명**
+            r'\[(\d+)\]\s+([^\n(]+?)(?:\s*\([^)]+\))?',  # [1] 식당명 (지역)
+        ]
+        
+        for pattern in patterns:
+            matches = re.findall(pattern, final_answer, re.MULTILINE)
+            if matches:
+                for match in matches:
+                    if isinstance(match, tuple):
+                        # (숫자, 이름) 형식인 경우
+                        if len(match) == 2:
+                            idx, name = match
+                            name = name.strip()
+                        else:
+                            name = match[0].strip()
+                    else:
+                        name = match.strip()
+                    
+                    # 괄호 안의 지역명 제거
+                    name = re.sub(r'\s*\([^)]+\)\s*$', '', name).strip()
+                    
+                    if name and len(name) > 1 and name not in [r["name"] for r in last_reco]:
+                        last_reco.append({"name": name, "index": len(last_reco) + 1})
+                
+                if last_reco:
+                    break
+    
+    # tool_trace_summary에서도 식당 목록 추출 (final_answer에 없을 경우 대비)
+    if not last_reco:
+        if key_info.get("search_results"):
+            for r in key_info["search_results"]:
+                name = r.get("name", "").strip()
+                if name and name not in [r["name"] for r in last_reco]:
+                    last_reco.append({"name": name, "index": r.get("index", len(last_reco) + 1)})
+        elif key_info.get("places_results"):
+            for r in key_info["places_results"]:
+                name = r.get("name", "").strip()
+                if name and name not in [r["name"] for r in last_reco]:
+                    last_reco.append({"name": name, "index": len(last_reco) + 1})
+    
+    session["last_reco"] = last_reco
+
+    # 최근 턴 리스트(recent_turns)에 현재 턴 추가 (최대 5개 유지)
+    recent_turns = session.get("recent_turns") or []
+    current_turn = {
+        "user_query": user_query,
+        "final_answer": session.get("last_final_answer", ""),
+        "tool_trace_summary": key_info,
+        "last_reco": last_reco,
+    }
+    recent_turns.append(current_turn)
+    # 뒤에서부터 최대 5개만 유지
+    if len(recent_turns) > 5:
+        recent_turns = recent_turns[-5:]
+    session["recent_turns"] = recent_turns
+
+    # 디버깅용 로그
+    logger.info(
+        f"[update_session_memory] 추천 식당: {len(last_reco)}개 {[r['name'] for r in last_reco]} "
+        f"(최근 턴 수: {len(recent_turns)})"
+    )
+
+    # 호환성을 위해 간단한 요약 텍스트도 저장
+    summary_parts = []
+    if key_info.get("search_results"):
+        summary_parts.append("[검색된 식당]")
+        for r in key_info["search_results"]:
+            summary_parts.append(f"  [{r['index']}] {r['name']}")
+    if key_info.get("places_results"):
+        summary_parts.append("[Places 정보]")
+        for r in key_info["places_results"]:
+            summary_parts.append(f"  - {r['name']}")
+    if key_info.get("budget_results", {}).get("restaurant"):
+        budget = key_info["budget_results"]
+        summary_parts.append(f"[예산 정보] 식당: {budget.get('restaurant')}")
+        if budget.get("total_budget"):
+            summary_parts.append(f"  총 예산: {budget['total_budget']}")
+    
+    session["last_tool_trace"] = "\n".join(summary_parts) if summary_parts else ""
 
     state["session_memory"] = session
 
@@ -121,6 +340,35 @@ def coordinator_node(state: AgentState) -> AgentState:
     content = f"[사용자 질문]\n{user_query}\n\n"
     if loop > 0 and prev_feedback:
         content += f"[이전 평가 피드백]\n{prev_feedback}\n"
+    
+    # 이전 대화 맥락 추가 (session_memory의 요약 정보 활용)
+    if session_memory:
+        tool_trace_summary = session_memory.get("last_tool_trace_summary", {})
+        last_final_answer = session_memory.get("last_final_answer", "")
+        last_reco = session_memory.get("last_reco", [])
+        
+        if tool_trace_summary or last_final_answer or last_reco:
+            content += "\n[이전 대화 맥락]\n"
+            
+            # 추천된 식당 목록 (last_reco 우선)
+            if last_reco:
+                content += "이전에 추천된 식당 목록:\n"
+                for r in last_reco:
+                    idx = r.get("index", 0)
+                    name = r.get("name", "")
+                    content += f"  [{idx}] {name}\n"
+            elif tool_trace_summary.get("search_results"):
+                content += "이전에 검색된 식당:\n"
+                for r in tool_trace_summary["search_results"]:
+                    content += f"  [{r['index']}] {r['name']}"
+                    if r.get("rating"):
+                        content += f" (평점: {r['rating']}점)"
+                    content += "\n"
+            
+            # 이전 답변 요약
+            if last_final_answer:
+                # final_answer에서 핵심 정보만 추출 (식당명, 메뉴 등)
+                content += f"\n이전 답변 요약:\n{last_final_answer[:500]}\n"
 
     messages = [
         SystemMessage(content=system_prompt + "\n\n" + instruct),
@@ -417,6 +665,7 @@ def budget_agent_node(state: AgentState) -> AgentState:
     core_plan = state.get("core_plan", "")
     subtask = state.get("subtask", "")
     tool_trace = state.get("tool_trace", "")  # search_agent나 places_agent 결과가 있을 수 있음
+    session_memory = state.get("session_memory", {})
     
     system_prompt = apply_prompt_template("budget_agent")
     
@@ -426,8 +675,80 @@ def budget_agent_node(state: AgentState) -> AgentState:
         f"[이번 턴 서브태스크]\n{subtask}\n\n"
     )
     
+    # tool_trace에서 식당명 추출하여 명시적으로 제공
+    restaurant_names = []
     if tool_trace:
+        # Search Agent 결과에서 식당명 추출
+        search_pattern = r'\[Search Agent 결과\].*?\[(\d+)\]\s+([^\n(]+?)(?:\s*\([^)]+\))?'
+        search_matches = re.findall(search_pattern, tool_trace, re.DOTALL)
+        for idx, name in search_matches:
+            name = name.strip()
+            if name and name not in restaurant_names:
+                restaurant_names.append(name)
+        
+        # Places Agent 결과에서 식당명 추출
+        places_pattern = r'\[Google Places 상세 정보\]\s*([^\n]+)'
+        places_matches = re.findall(places_pattern, tool_trace)
+        for name in places_matches:
+            name = name.strip()
+            if name and name not in restaurant_names:
+                restaurant_names.append(name)
+        
         content += f"[이전 검색 결과 (참고용)]\n{tool_trace}\n\n"
+    
+    # session_memory에서도 식당명 추출 (last_reco 우선)
+    if session_memory:
+        # last_reco에서 추천된 식당 목록 추출 (final_answer에서 추출한 것)
+        last_reco = session_memory.get("last_reco", [])
+        if last_reco:
+            for r in last_reco:
+                name = r.get("name", "").strip()
+                if name and name not in restaurant_names:
+                    restaurant_names.append(name)
+        
+        # tool_trace_summary에서도 추출 (last_reco가 없을 경우 대비)
+        if not restaurant_names:
+            tool_trace_summary = session_memory.get("last_tool_trace_summary", {})
+            if tool_trace_summary.get("search_results"):
+                for r in tool_trace_summary["search_results"]:
+                    name = r.get("name", "").strip()
+                    if name and name not in restaurant_names:
+                        restaurant_names.append(name)
+            elif tool_trace_summary.get("places_results"):
+                for r in tool_trace_summary["places_results"]:
+                    name = r.get("name", "").strip()
+                    if name and name not in restaurant_names:
+                        restaurant_names.append(name)
+    
+    # 사용자 질문에서 "두번째", "첫번째", "1등" 같은 지시어 해석
+    target_restaurant_name = None
+    if user_query:
+        # "두번째", "2번째", "2등" 같은 패턴 찾기
+        second_patterns = [r'두\s*번째', r'2\s*번째', r'2\s*등', r'두\s*번째\s*추천', r'두\s*번째\s*식당']
+        first_patterns = [r'첫\s*번째', r'1\s*번째', r'1\s*등', r'첫\s*번째\s*추천', r'첫\s*번째\s*식당', r'거기서']
+        
+        is_second = any(re.search(p, user_query, re.IGNORECASE) for p in second_patterns)
+        is_first = any(re.search(p, user_query, re.IGNORECASE) for p in first_patterns)
+        
+        if is_second and len(restaurant_names) >= 2:
+            target_restaurant_name = restaurant_names[1]  # 두 번째 (인덱스 1)
+        elif is_first and len(restaurant_names) >= 1:
+            target_restaurant_name = restaurant_names[0]  # 첫 번째 (인덱스 0)
+    
+    # 식당명이 있으면 명시적으로 제공
+    if restaurant_names:
+        content += f"[찾은 식당 목록]\n"
+        for i, name in enumerate(restaurant_names, 1):
+            marker = " ← 이 식당" if target_restaurant_name and name == target_restaurant_name else ""
+            content += f"  {i}. {name}{marker}\n"
+        
+        if target_restaurant_name:
+            content += f"\n**중요: 사용자가 '{user_query}'라고 했으므로, '{target_restaurant_name}'의 메뉴를 조회해야 합니다. "
+            content += f"menu_price_tool을 사용할 때는 정확히 '{target_restaurant_name}'라는 이름을 사용하세요.**\n\n"
+        else:
+            content += "\n**중요: menu_price_tool을 사용할 때는 위 식당명 중 하나를 정확히 사용해야 합니다. "
+            content += "식당명이 정확히 일치하지 않으면 메뉴를 찾을 수 없습니다. "
+            content += "사용자가 '첫번째', '1등', '두번째', '2등', '거기서' 같은 지시어를 사용했다면, 위 목록에서 해당하는 식당명을 사용하세요.**\n\n"
     
     content += "위 정보를 바탕으로 예산을 계산해줘."
     
@@ -478,11 +799,36 @@ def supervisor_node(state: AgentState) -> AgentState:
     
     system_prompt = apply_prompt_template("supervisor")
     
-    # tool_trace가 너무 길면 일부만 사용 (LLM 토큰 제한 고려)
-    tool_trace_preview = tool_trace[:3000] if len(tool_trace) > 3000 else tool_trace
-    if len(tool_trace) > 3000:
+    # tool_trace가 너무 길면 Budget Agent 결과를 우선 포함하도록 처리
+    MAX_TRACE_LENGTH = 3000
+    if len(tool_trace) > MAX_TRACE_LENGTH:
+        # Budget Agent 결과 위치 찾기
+        budget_section = tool_trace.find("[Budget Agent 결과]")
+        
+        if budget_section != -1:
+            # Budget Agent 결과부터 끝까지 포함
+            budget_section_length = len(tool_trace) - budget_section
+            
+            if budget_section_length <= MAX_TRACE_LENGTH:
+                # Budget Agent 결과를 포함하면서 앞부분도 가능한 한 많이 포함
+                remaining = MAX_TRACE_LENGTH - budget_section_length
+                if remaining > 0:
+                    tool_trace_preview = tool_trace[:remaining] + "\n\n... (중간 생략) ...\n\n" + tool_trace[budget_section:]
+                else:
+                    tool_trace_preview = tool_trace[budget_section:]
+            else:
+                # Budget Agent 결과가 너무 길면 Budget Agent 결과만 포함 (최대 길이 제한)
+                tool_trace_preview = tool_trace[budget_section:budget_section + MAX_TRACE_LENGTH]
+            
+            logger.info("[Supervisor] Budget Agent 결과 우선 포함: %d -> %d", len(tool_trace), len(tool_trace_preview))
+        else:
+            # Budget Agent 결과가 없으면 앞부분만 사용
+            tool_trace_preview = tool_trace[:MAX_TRACE_LENGTH]
+            logger.warning("[Supervisor] tool_trace가 너무 길어 일부만 사용: %d -> %d", len(tool_trace), len(tool_trace_preview))
+        
         tool_trace_preview += "\n\n[참고: tool_trace가 길어 일부만 표시했습니다. 위 정보를 우선 참고하세요.]"
-        logger.warning("[Supervisor] tool_trace가 너무 길어 일부만 사용: %d -> %d", len(tool_trace), len(tool_trace_preview))
+    else:
+        tool_trace_preview = tool_trace
     
     messages = [
         SystemMessage(content=system_prompt),
@@ -493,10 +839,15 @@ def supervisor_node(state: AgentState) -> AgentState:
                 f"[코어 계획]\n{core_plan}\n\n"
                 f"[이번 턴 서브태스크]\n{subtask}\n\n"
                 f"[툴 실행 결과/메모]\n{tool_trace_preview}\n\n"
-                "**중요: es_search_tool 결과에 나온 식당만 언급해야 합니다. "
+                "**중요 지침:**\n"
+                "1. es_search_tool 결과에 나온 식당만 언급해야 합니다. "
                 "검색 결과에 '[1] 식당명', '[2] 식당명' 형식으로 나온 식당들만 답변에 포함하고, "
-                "검색 결과에 없는 식당은 절대 언급하지 마세요. "
-                "사용자 입장에서 이해하기 쉽도록, 단계적으로 설명해줘."
+                "검색 결과에 없는 식당은 절대 언급하지 마세요.\n"
+                "2. Budget Agent 결과에 메뉴 정보가 있으면 반드시 포함해야 합니다. "
+                "메뉴 목록, 가격, 추천 메뉴 등 모든 정보를 정확하게 반영하세요.\n"
+                "3. 사용자가 '거기서', '첫번째', '1등' 같은 지시어를 사용했다면, "
+                "이전 대화에서 추천한 식당 중 해당하는 식당만 집중해서 답변하세요.\n"
+                "4. 사용자 입장에서 이해하기 쉽도록, 단계적으로 설명해줘."
             )
         ),
     ]
@@ -533,11 +884,16 @@ def evaluator_node(state: AgentState) -> AgentState:
     """
     user_query = state["user_query"]
     draft = state.get("draft_answer", "")
+    session_memory = state.get("session_memory", {})
+    tool_trace = state.get("tool_trace", "")
 
     system_prompt = apply_prompt_template("evaluator")
     instruct = (
         "너는 답변 평가자야.\n"
         "아래 질문과 초안 답변을 보고, 답변이 충분히 만족스러운지 평가해.\n"
+        "**중요: 사용자가 '거기서', '첫번째', '1등' 같은 지시어를 사용했다면, "
+        "이전 대화 맥락을 참고하여 올바르게 해석되었는지 확인하세요.**\n"
+        "도구에서 정보를 잘 찾았고 답변에 반영되었다면, 작은 표현상의 문제는 revision을 요구하지 마세요.\n"
         "JSON 형식으로만 답해:\n"
         "{\n"
         '  \"needs_revision\": true/false,\n'
@@ -545,14 +901,37 @@ def evaluator_node(state: AgentState) -> AgentState:
         "}"
     )
 
+    content = f"[사용자 질문]\n{user_query}\n\n"
+    
+    # 이전 대화 맥락 제공
+    if session_memory:
+        tool_trace_summary = session_memory.get("last_tool_trace_summary", {})
+        last_final_answer = session_memory.get("last_final_answer", "")
+        
+        if tool_trace_summary or last_final_answer:
+            content += "[이전 대화 맥락]\n"
+            
+            # 검색된 식당 목록
+            if tool_trace_summary.get("search_results"):
+                content += "이전에 검색된 식당:\n"
+                for r in tool_trace_summary["search_results"]:
+                    content += f"  [{r['index']}] {r['name']}\n"
+            
+            # 이전 답변 요약
+            if last_final_answer:
+                content += f"\n이전 답변 요약:\n{last_final_answer[:500]}\n\n"
+    
+    # Budget Agent 결과가 있으면 명시적으로 제공
+    if "[Budget Agent 결과]" in tool_trace:
+        budget_section = tool_trace.find("[Budget Agent 결과]")
+        budget_content = tool_trace[budget_section:budget_section + 1000]  # Budget Agent 결과 일부
+        content += f"[도구 실행 결과 (참고용)]\n{budget_content}\n\n"
+    
+    content += f"[초안 답변]\n{draft}"
+
     messages = [
         SystemMessage(content=system_prompt + "\n\n" + instruct),
-        HumanMessage(
-            content=(
-                f"[사용자 질문]\n{user_query}\n\n"
-                f"[초안 답변]\n{draft}"
-            )
-        ),
+        HumanMessage(content=content),
     ]
 
     try:
@@ -618,10 +997,10 @@ def evaluator_node(state: AgentState) -> AgentState:
     loop = state.get("loop_count", 0) + 1
     state["loop_count"] = loop
 
-    # 너무 많이 루프 돌면 강제로 종료 (최대 3번: 첫 실행 + 재시도 2번)
-    if loop >= 3:
+    # 너무 많이 루프 돌면 강제로 종료 (최대 2번: 첫 실행 + 재시도 1번)
+    if loop >= 2:
         needs_revision = False
-        logger.info("[Evaluator] 최대 루프 횟수(3번) 도달, 강제 종료")
+        logger.info("[Evaluator] 최대 루프 횟수(2번) 도달, 강제 종료")
 
     state["needs_revision"] = needs_revision
     state["eval_feedback"] = feedback
@@ -647,18 +1026,23 @@ def final_output_node(state: AgentState) -> AgentState:
     """
     최종 답변(final_answer)을 가독성 좋게 정리하고 출력하는 노드.
     포맷팅된 답변을 state에 저장하여 LangGraph Studio에서도 확인할 수 있도록 함.
+    질문과 관련된 정보만 포함하도록 필터링합니다.
     """
     final_answer = state.get("final_answer", "")
+    user_query = state.get("user_query", "")
     
     if final_answer:
-        # LLM을 사용해서 가독성 좋게 정리
+        # LLM을 사용해서 가독성 좋게 정리 (질문과 관련된 정보만 포함)
         system_prompt = apply_prompt_template("final_output")
         messages = [
             SystemMessage(content=system_prompt),
             HumanMessage(
                 content=(
-                    "아래 최종 답변을 가독성 좋게 정리해서 다시 작성해줘.\n\n"
-                    f"[원본 답변]\n{final_answer}"
+                    f"[사용자 질문]\n{user_query}\n\n"
+                    f"[원본 답변]\n{final_answer}\n\n"
+                    "**중요: 위 사용자 질문과 직접적으로 관련된 정보만 포함하여 답변을 정리해주세요. "
+                    "질문과 관련 없는 정보는 제거하세요. 예를 들어, 사용자가 '두번째 추천 식당의 메뉴'를 물었다면, "
+                    "해당 식당의 메뉴 정보만 포함하고 다른 식당의 정보나 리뷰, 영업시간 등은 포함하지 마세요.**"
                 )
             ),
         ]

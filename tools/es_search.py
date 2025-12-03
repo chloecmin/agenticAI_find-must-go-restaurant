@@ -144,68 +144,55 @@ Query: {query}
 
 Translated query:"""
         
-        # 더 안정적인 모델 사용 (여러 옵션 시도)
-        # 참고: OpenRouter에서 무료 모델은 모델 이름에 :free를 붙이지 않음
-        model_options = [
-            "openai/gpt-oss-20b:free"
-            "qwen/qwen-2.5-7b-instruct:free",  # 안정적인 무료 모델
-            "meta-llama/llama-3.2-3b-instruct:free",  # 대안 무료 모델
-        ]
+        # BASE_LLM_MODEL 사용 (다른 부분과 동일한 모델로 통일)
+        base_model = os.getenv("BASE_LLM_MODEL", "qwen/qwen3-30b-a3b:free")
         
-        logger.info(f"[translate_query] 번역 시작: '{query}'")
+        logger.info(f"[translate_query] 번역 시작: '{query}' (모델: {base_model})")
         
+        # BASE_LLM_MODEL 사용
+        model = base_model
         last_error = None
-        for model in model_options:
-            try:
-                data = {
-                    "model": model,
-                    "messages": [
-                        {"role": "user", "content": prompt}
-                    ],
-                    "temperature": 0.1,
-                    "max_tokens": 50
-                }
-                
-                logger.info(f"[translate_query] 모델 시도: {model}")
-                response = requests.post(url, headers=headers, json=data, timeout=10)
-                
-                # 404 에러면 다른 모델 시도
-                if response.status_code == 404:
-                    logger.warning(f"[translate_query] 모델 {model} 404 에러, 다음 모델 시도")
-                    last_error = f"Model {model} not found (404)"
-                    continue
-                
-                response.raise_for_status()
-                result = response.json()
-                
-                translated = result.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
-                
-                # 따옴표 제거
-                translated = translated.strip('"\'')
-                
-                if translated:
-                    logger.info(f"[translate_query] 번역 완료 ({model}): '{query}' → '{translated}'")
-                    return translated
-                else:
-                    logger.warning(f"[translate_query] 번역 결과가 비어있음 (모델: {model})")
-                    continue
-                    
-            except requests.exceptions.HTTPError as e:
-                if e.response.status_code == 404:
-                    logger.warning(f"[translate_query] 모델 {model} 404 에러: {str(e)}")
-                    last_error = str(e)
-                    continue
-                else:
-                    logger.warning(f"[translate_query] HTTP 에러 ({model}): {str(e)}")
-                    last_error = str(e)
-                    continue
-            except Exception as e:
-                logger.warning(f"[translate_query] 에러 ({model}): {str(e)}")
-                last_error = str(e)
-                continue
         
-        # 모든 모델 실패
-        logger.warning(f"[translate_query] 모든 모델 실패, 원본 사용. 마지막 에러: {last_error}")
+        try:
+            # 한 번만 시도 (BASE_LLM_MODEL 사용)
+            data = {
+                "model": model,
+                "messages": [
+                    {"role": "user", "content": prompt}
+                ],
+                "temperature": 0.1,
+                "max_tokens": 50
+            }
+            
+            logger.info(f"[translate_query] 모델 사용: {model}")
+            response = requests.post(url, headers=headers, json=data, timeout=30)
+            
+            response.raise_for_status()
+            result = response.json()
+            
+            translated = result.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
+            
+            # 따옴표 제거
+            translated = translated.strip('"\'')
+            
+            if translated:
+                logger.info(f"[translate_query] 번역 완료 ({model}): '{query}' → '{translated}'")
+                return translated
+            else:
+                logger.warning(f"[translate_query] 번역 결과가 비어있음 (모델: {model})")
+                return query
+                
+        except requests.exceptions.HTTPError as e:
+            logger.warning(f"[translate_query] HTTP 에러 ({model}): {str(e)}")
+            last_error = str(e)
+        except Exception as e:
+            logger.warning(f"[translate_query] 에러 ({model}): {str(e)}")
+            last_error = str(e)
+        
+        # 실패 시 원본 반환
+        if last_error:
+            logger.warning(f"[translate_query] 번역 실패, 원본 사용. 에러: {last_error}")
+        
         return query
             
     except Exception as e:
