@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 import os
+import logging
 from typing import List, Dict, Any
 from langchain_core.tools import tool
 
@@ -11,6 +12,20 @@ from .utility_func import (
     calculator,
     load_menus_for_restaurant,
 )
+
+# 로거 설정
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+
+# 로그 포맷 설정 (터미널에서 더 잘 보이도록)
+if not logger.handlers:
+    handler = logging.StreamHandler()
+    formatter = logging.Formatter(
+        '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
+    )
+    handler.setFormatter(formatter)
+    logger.addHandler(handler)
 
 
 @tool
@@ -25,9 +40,6 @@ def es_search_tool(query: str, size: int = 5) -> str:
         query: 검색 쿼리 (예: "홍대 우동", "강남 한식")
         size: 반환할 결과 개수 (기본값: 5)
     """
-    import logging
-    logger = logging.getLogger(__name__)
-    
     try:
         logger.info(f"[es_search_tool] 검색 시작: query='{query}', size={size}")
         
@@ -35,28 +47,36 @@ def es_search_tool(query: str, size: int = 5) -> str:
         cuisine_type, _ = extract_cuisine_type(query)
         
         # 번역된 쿼리에서도 음식 종류 확인 (번역 후 영어 키워드가 나올 수 있음)
+        translated_query = query
         if not cuisine_type:
             translated_query = translate_query_to_english(query)
             if translated_query != query:
+                logger.info(f"[es_search_tool] 쿼리 번역: '{query}' → '{translated_query}' (BM25 검색용)")
                 cuisine_type, _ = extract_cuisine_type(translated_query)
         
         # 1) Sparse Search (BM25) - 10개 가져오기
         sparse_results = []
         try:
-            logger.info("[es_search_tool] Sparse 검색 시작...")
-            sparse_results = search_es(query, size=10)
-            logger.info(f"[es_search_tool] Sparse 검색 완료: {len(sparse_results)}개 결과")
+            logger.info(f"[es_search_tool] [BM25] 검색 시작... (쿼리: '{translated_query}')")
+            sparse_results = search_es(translated_query, size=10)
+            logger.info(f"[es_search_tool] [BM25] 검색 완료: {len(sparse_results)}개 결과 발견")
         except Exception as e:
-            logger.warning(f"[es_search_tool] Sparse 검색 실패 (계속 진행): {str(e)}")
+            logger.warning(f"[es_search_tool] [BM25] 검색 실패 (계속 진행): {str(e)}")
         
         # 2) Dense Search (KNN) - 10개 가져오기
         dense_results = []
         try:
-            logger.info("[es_search_tool] Dense 검색 시작...")
+            logger.info(f"[es_search_tool] [Dense/KNN] 검색 시작... (쿼리: '{query}')")
             dense_results = dense_search(query, size=10)
-            logger.info(f"[es_search_tool] Dense 검색 완료: {len(dense_results)}개 결과")
+            logger.info(f"[es_search_tool] [Dense/KNN] 검색 완료: {len(dense_results)}개 결과 발견")
         except Exception as e:
-            logger.warning(f"[es_search_tool] Dense 검색 실패 (Sparse 결과만 사용): {str(e)}")
+            logger.warning(f"[es_search_tool] [Dense/KNN] 검색 실패 (Sparse 결과만 사용): {str(e)}")
+        
+        # 검색 결과 요약 로그
+        logger.info(f"[es_search_tool] ===== 검색 결과 요약 =====")
+        logger.info(f"[es_search_tool] BM25 (Sparse): {len(sparse_results)}개 결과")
+        logger.info(f"[es_search_tool] Dense (KNN): {len(dense_results)}개 결과")
+        logger.info(f"[es_search_tool] ==========================")
         
         # 둘 다 실패한 경우
         if not sparse_results and not dense_results:
@@ -64,9 +84,9 @@ def es_search_tool(query: str, size: int = 5) -> str:
             return "검색 결과가 없습니다. Elasticsearch 연결 또는 인덱스를 확인해주세요."
         
         # 3) RRF로 결과 결합 (k=60)
-        logger.info("[es_search_tool] RRF 결합 시작...")
+        logger.info("[es_search_tool] [RRF] 결과 결합 시작...")
         fused_results = _rrf_fusion(sparse_results, dense_results, k=60)
-        logger.info(f"[es_search_tool] RRF 결합 완료: {len(fused_results)}개 결과")
+        logger.info(f"[es_search_tool] [RRF] 결합 완료: {len(fused_results)}개 결과 (BM25: {len(sparse_results)}개 + Dense: {len(dense_results)}개 → {len(fused_results)}개)")
         
         # 4) 특정 음식 종류 검색인 경우 결과 필터링 (cuisines에 해당 키워드 포함 확인)
         if cuisine_type:
